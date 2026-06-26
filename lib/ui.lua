@@ -415,52 +415,36 @@ function UI.mount(opts)
 		return r
 	end
 
-	-- Dropdown row: label on left, value pill on right (shows current pick).
-	-- Click the pill → option list expands below; pick → row collapses.
-	-- The row container grows vertically when open so siblings push down
-	-- cleanly instead of overlapping.
+	-- Dropdown row — proper menu, not inline list.
+	-- Click the pill → a floating panel pops over the UI (parented to gui,
+	-- not parent), with accent stroke, drop shadow, and a height tween on
+	-- open/close. Selected option fills with accent. Click outside closes.
+	--
+	-- This is the "premium" dropdown. The row stays a fixed height; the
+	-- float panel overlays content below it (sibling pages won't shift).
 	function Builder.dropdownRow(parent, labelText, options, getF, setF)
-		-- Outer container holds two stacked rows: header + (optional) panel.
-		-- It has its own UIListLayout to position them; AutomaticSize.Y grows
-		-- as the panel expands. NOT using Builder.row here because that adds
-		-- a row background — we want the background only on the header.
-		local container = Instance.new("Frame", parent)
-		container.Size = UDim2.new(1, -8, 0, 30)
-		container.AutomaticSize = Enum.AutomaticSize.Y
-		container.BackgroundTransparency = 1
-		container.BorderSizePixel = 0
+		local r = Builder.row(parent, 30)
 
-		local containerLayout = Instance.new("UIListLayout", container)
-		containerLayout.SortOrder = Enum.SortOrder.LayoutOrder
-		containerLayout.Padding = UDim.new(0, 2)
-
-		-- Header (the always-visible row)
-		local header = Instance.new("Frame", container)
-		header.LayoutOrder = 0
-		header.Size = UDim2.new(1, 0, 0, 30)
-		Theme.bind(header, "BackgroundColor3", "row"); header.BorderSizePixel = 0
-		Instance.new("UICorner", header).CornerRadius = UDim.new(0, 4)
-
-		local l = Instance.new("TextLabel", header)
+		local l = Instance.new("TextLabel", r)
 		l.Size = UDim2.new(0.55, 0, 1, 0); l.Position = UDim2.fromOffset(12, 0)
 		l.BackgroundTransparency = 1; l.Text = labelText
 		l.Font = Enum.Font.Gotham; l.TextSize = 12
 		Theme.bind(l, "TextColor3", "text"); l.TextXAlignment = Enum.TextXAlignment.Left
 
-		-- Value pill — empty Text so no default "Button" word leaks through.
-		local pill = Instance.new("TextButton", header)
+		-- The visible trigger pill — empty intrinsic Text so the default
+		-- TextButton "Button" word doesn't leak under the value label.
+		local pill = Instance.new("TextButton", r)
 		pill.Size = UDim2.new(0.45, -20, 0, 22)
 		pill.Position = UDim2.new(0.55, 0, 0.5, -11)
 		Theme.bind(pill, "BackgroundColor3", "elev"); pill.AutoButtonColor = false
-		pill.Text = ""  -- ← the bug last time. don't let TextButton's default show.
-		Instance.new("UICorner", pill).CornerRadius = UDim.new(0, 4)
+		pill.Text = ""
+		Instance.new("UICorner", pill).CornerRadius = UDim.new(0, 5)
 		local pillStroke = Instance.new("UIStroke", pill)
 		Theme.bind(pillStroke, "Color", "stroke")
-		pillStroke.Thickness = 1; pillStroke.Transparency = 0.55
+		pillStroke.Thickness = 1; pillStroke.Transparency = 0.5
 
 		local valueLbl = Instance.new("TextLabel", pill)
-		valueLbl.Size = UDim2.new(1, -22, 1, 0)
-		valueLbl.Position = UDim2.fromOffset(10, 0)
+		valueLbl.Size = UDim2.new(1, -22, 1, 0); valueLbl.Position = UDim2.fromOffset(10, 0)
 		valueLbl.BackgroundTransparency = 1
 		valueLbl.Font = Enum.Font.GothamMedium; valueLbl.TextSize = 11
 		Theme.bind(valueLbl, "TextColor3", "text")
@@ -475,48 +459,180 @@ function UI.mount(opts)
 		Theme.bind(arrow, "TextColor3", "textDim")
 		arrow.Text = "▾"
 
-		-- Options panel (toggled by Visible — when hidden it contributes
-		-- zero height to the container's auto-size).
-		local panel = Instance.new("Frame", container)
-		panel.LayoutOrder = 1
-		panel.Size = UDim2.new(1, 0, 0, #options * 26 + 2)
-		panel.BackgroundTransparency = 1
-		panel.Visible = false
+		-- pill hover affordance
+		pill.MouseEnter:Connect(function()
+			pillStroke.Transparency = 0.15
+			arrow.TextColor3 = Theme.token("accent")
+		end)
+		pill.MouseLeave:Connect(function()
+			pillStroke.Transparency = 0.5
+			arrow.TextColor3 = Theme.token("textDim")
+		end)
 
-		local panelLayout = Instance.new("UIListLayout", panel)
-		panelLayout.SortOrder = Enum.SortOrder.LayoutOrder
-		panelLayout.Padding = UDim.new(0, 2)
+		-- Float-panel state
+		local floatPanel
+		local closeConn  -- click-outside-to-close listener
+		local arrowRotConn
 
-		local isOpen = false
-		local function setOpen(state)
-			isOpen = state
-			panel.Visible = state
-			arrow.Text = state and "▴" or "▾"
+		local function close()
+			if not floatPanel then return end
+			local p = floatPanel
+			floatPanel = nil
+			if closeConn then closeConn:Disconnect(); closeConn = nil end
+			arrow.Text = "▾"
+			local fullSize = p.Size
+			local closeTween = TweenService:Create(
+				p, TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
+				{ Size = UDim2.new(fullSize.X.Scale, fullSize.X.Offset, 0, 0) }
+			)
+			closeTween:Play()
+			closeTween.Completed:Connect(function() if p.Parent then p:Destroy() end end)
 		end
 
-		pill.MouseButton1Click:Connect(function() setOpen(not isOpen) end)
+		local function rebuildIfNeeded() end  -- forward-declared; defined below
 
-		for i, opt in ipairs(options) do
-			local optBtn = Instance.new("TextButton", panel)
-			optBtn.LayoutOrder = i
-			optBtn.Size = UDim2.new(1, 0, 0, 24)
-			Theme.bind(optBtn, "BackgroundColor3", "row")
-			optBtn.AutoButtonColor = false
-			optBtn.Font = Enum.Font.Gotham; optBtn.TextSize = 11
-			Theme.bind(optBtn, "TextColor3", "text")
-			optBtn.Text = "    " .. opt  -- left padding via text instead of UIPadding
-			optBtn.TextXAlignment = Enum.TextXAlignment.Left
-			Instance.new("UICorner", optBtn).CornerRadius = UDim.new(0, 4)
-			optBtn.MouseEnter:Connect(function() optBtn.BackgroundColor3 = Theme.token("elev") end)
-			optBtn.MouseLeave:Connect(function() optBtn.BackgroundColor3 = Theme.token("row") end)
-			optBtn.MouseButton1Click:Connect(function()
-				setF(opt)
-				valueLbl.Text = opt
-				setOpen(false)
+		local function open()
+			if floatPanel then return end
+			arrow.Text = "▴"
+
+			-- Compute the trigger's absolute screen coords so the float
+			-- positions itself under the pill regardless of which scrolled
+			-- page hosts the row.
+			local pillAbs  = pill.AbsolutePosition
+			local pillSize = pill.AbsoluteSize
+			local guiAbs   = gui.AbsolutePosition or Vector2.new(0, 0)  -- ScreenGui top-left
+
+			local panelW = math.max(pillSize.X, 120)
+			local panelH = #options * 28 + 12
+
+			local p = Instance.new("Frame")
+			p.Name = "Vellum_Dropdown"
+			p.AnchorPoint = Vector2.new(0, 0)
+			p.Position = UDim2.fromOffset(pillAbs.X - guiAbs.X, pillAbs.Y - guiAbs.Y + pillSize.Y + 4)
+			p.Size = UDim2.fromOffset(panelW, 0)  -- start collapsed for tween-in
+			Theme.bind(p, "BackgroundColor3", "panel"); p.BorderSizePixel = 0
+			p.ZIndex = 100; p.ClipsDescendants = true
+			Instance.new("UICorner", p).CornerRadius = UDim.new(0, 6)
+
+			-- Accent stroke = the premium feel
+			local accentStroke = Instance.new("UIStroke", p)
+			Theme.bind(accentStroke, "Color", "accent")
+			accentStroke.Thickness = 1.4
+			accentStroke.Transparency = 0.25
+
+			-- Inner content gets padding so options don't kiss the corners
+			local pad = Instance.new("UIPadding", p)
+			pad.PaddingTop = UDim.new(0, 5); pad.PaddingBottom = UDim.new(0, 5)
+			pad.PaddingLeft = UDim.new(0, 5); pad.PaddingRight = UDim.new(0, 5)
+
+			local list = Instance.new("UIListLayout", p)
+			list.Padding = UDim.new(0, 2)
+			list.SortOrder = Enum.SortOrder.LayoutOrder
+
+			local currentSelection = getF()
+
+			for i, opt in ipairs(options) do
+				local isSel = (opt == currentSelection)
+
+				local optBtn = Instance.new("TextButton", p)
+				optBtn.LayoutOrder = i
+				optBtn.Size = UDim2.new(1, 0, 0, 26)
+				optBtn.AutoButtonColor = false
+				optBtn.Text = ""  -- label rendered by child for cleaner alignment
+				optBtn.ZIndex = 101
+				Instance.new("UICorner", optBtn).CornerRadius = UDim.new(0, 4)
+
+				-- selected gets accent fill + check mark; others get row fill
+				if isSel then
+					optBtn.BackgroundColor3 = Theme.token("accent")
+					optBtn.BackgroundTransparency = 0.15
+				else
+					Theme.bind(optBtn, "BackgroundColor3", "row")
+					optBtn.BackgroundTransparency = 0.4
+				end
+
+				local optLbl = Instance.new("TextLabel", optBtn)
+				optLbl.Size = UDim2.new(1, -28, 1, 0)
+				optLbl.Position = UDim2.fromOffset(12, 0)
+				optLbl.BackgroundTransparency = 1
+				optLbl.Font = isSel and Enum.Font.GothamBold or Enum.Font.Gotham
+				optLbl.TextSize = 11
+				optLbl.TextXAlignment = Enum.TextXAlignment.Left
+				optLbl.Text = opt
+				optLbl.ZIndex = 102
+				if isSel then
+					optLbl.TextColor3 = Theme.token("accentText")
+				else
+					Theme.bind(optLbl, "TextColor3", "text")
+				end
+
+				-- subtle check-mark on selected
+				if isSel then
+					local check = Instance.new("TextLabel", optBtn)
+					check.Size = UDim2.fromOffset(20, 26)
+					check.Position = UDim2.new(1, -22, 0, 0)
+					check.BackgroundTransparency = 1
+					check.Font = Enum.Font.GothamBold; check.TextSize = 12
+					check.TextColor3 = Theme.token("accentText")
+					check.Text = "✓"
+					check.ZIndex = 102
+				end
+
+				-- hover affordance for non-selected items
+				if not isSel then
+					optBtn.MouseEnter:Connect(function()
+						optBtn.BackgroundColor3 = Theme.token("elev")
+						optBtn.BackgroundTransparency = 0
+					end)
+					optBtn.MouseLeave:Connect(function()
+						optBtn.BackgroundColor3 = Theme.token("row")
+						optBtn.BackgroundTransparency = 0.4
+					end)
+				end
+
+				optBtn.MouseButton1Click:Connect(function()
+					setF(opt)
+					valueLbl.Text = opt
+					close()
+				end)
+			end
+
+			p.Parent = gui  -- overlay on the root ScreenGui
+
+			-- Tween-in: panel expands from height=0 down to full
+			TweenService:Create(
+				p, TweenInfo.new(0.18, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
+				{ Size = UDim2.fromOffset(panelW, panelH) }
+			):Play()
+
+			floatPanel = p
+
+			-- Click outside the float panel = close. Bind on the gui root.
+			closeConn = UserInputService.InputBegan:Connect(function(input, processed)
+				if processed then return end
+				if input.UserInputType ~= Enum.UserInputType.MouseButton1
+				   and input.UserInputType ~= Enum.UserInputType.Touch then return end
+				local pos = UserInputService:GetMouseLocation()
+				if not floatPanel then return end
+				local abs, sz = floatPanel.AbsolutePosition, floatPanel.AbsoluteSize
+				-- guard against null sizes during tween
+				if sz.X <= 0 or sz.Y <= 0 then return end
+				local insidePanel =
+					pos.X >= abs.X and pos.X <= abs.X + sz.X and
+					pos.Y >= abs.Y and pos.Y <= abs.Y + sz.Y
+				local pillAb, pillSz = pill.AbsolutePosition, pill.AbsoluteSize
+				local insidePill =
+					pos.X >= pillAb.X and pos.X <= pillAb.X + pillSz.X and
+					pos.Y >= pillAb.Y and pos.Y <= pillAb.Y + pillSz.Y
+				if not insidePanel and not insidePill then close() end
 			end)
 		end
 
-		return container
+		pill.MouseButton1Click:Connect(function()
+			if floatPanel then close() else open() end
+		end)
+
+		return r
 	end
 
 	function Builder.actionBtn(parent, label, fn)
