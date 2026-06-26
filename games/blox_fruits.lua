@@ -42,29 +42,29 @@ function Module.start(lib)
 	local gui
 
 	-- ═══════════════════════════ R TABLE ═══════════════════════════
-	-- Resolved once. If any of these is nil at boot, the script aborts loudly
-	-- — better than silent failure deep in a loop.
+	-- Resolved once. Optional remotes resolve via FindFirstChild — events like
+	-- Leviathan/SegmentHit aren't always live at boot, and EquipEvent is a
+	-- per-tool child, NOT a global remote. WaitForChild on those hangs forever.
 	local Net = ReplicatedStorage:WaitForChild("Modules"):WaitForChild("Net")
 	local Remotes = ReplicatedStorage:WaitForChild("Remotes")
 
 	local R = {
-		-- combat (verified)
+		-- combat (verified, REQUIRED)
 		RegisterAttack = Net:WaitForChild("RE/RegisterAttack"),
 		RegisterHit    = Net:WaitForChild("RE/RegisterHit"),
-		EquipEvent     = Remotes:WaitForChild("EquipEvent"),
-		-- dispatchers
+		-- dispatchers (REQUIRED)
 		CommF_         = Remotes:WaitForChild("CommF_"),
-		CommF          = Remotes:WaitForChild("CommF"),
+		CommF          = Remotes:FindFirstChild("CommF"),
 		CommE          = Remotes:WaitForChild("CommE"),
-		-- direct verbs (read by their dispatcher pattern, not InvokeServer)
-		Stats          = Remotes:WaitForChild("Stats"),
-		Combo          = Remotes:WaitForChild("Combo"),
-		Raids          = Remotes:WaitForChild("Raids"),
-		Leviathan      = Remotes:WaitForChild("Leviathan"),
-		SegmentHit     = Remotes:WaitForChild("SegmentHit"),
-		Redeem         = Remotes:WaitForChild("Redeem"),
-		QuestUpdate    = Remotes:WaitForChild("QuestUpdate"),
-		Chest          = Remotes:WaitForChild("Chest"),
+		-- direct verbs (optional — present-when-relevant)
+		Stats          = Remotes:FindFirstChild("Stats"),
+		Combo          = Remotes:FindFirstChild("Combo"),
+		Raids          = Remotes:FindFirstChild("Raids"),
+		Leviathan      = Remotes:FindFirstChild("Leviathan"),
+		SegmentHit     = Remotes:FindFirstChild("SegmentHit"),
+		Redeem         = Remotes:FindFirstChild("Redeem"),
+		QuestUpdate    = Remotes:FindFirstChild("QuestUpdate"),
+		Chest          = Remotes:FindFirstChild("Chest"),
 	}
 
 	-- ═══════════════════════════ CONFIG ═══════════════════════════
