@@ -27,14 +27,36 @@ local BASE = "https://raw.githubusercontent.com/Pekenz/vellum/main"
 
 local _moduleCache = {}
 
+-- Roblox's game:HttpGet aggressively caches responses (and ignores query
+-- busters), so pushed fixes can sit invisible for hours. Executors expose a
+-- richer `request` / `http_request` / syn.request — those honor headers,
+-- including Cache-Control. We try those first and fall back to HttpGet.
+local _request = (syn and syn.request)
+	or (fluxus and fluxus.request)
+	or http_request
+	or request
+
+local function httpFetch(url)
+	if _request then
+		local res = _request({
+			Url = url,
+			Method = "GET",
+			Headers = {
+				["Cache-Control"] = "no-cache",
+				["Pragma"] = "no-cache",
+			},
+		})
+		return res and (res.Body or res.body)
+	end
+	return game:HttpGet(url)
+end
+
 local function fetchModule(path)
 	if _moduleCache[path] then return _moduleCache[path] end
-	-- Roblox HttpGet caches responses aggressively. A query-string buster
-	-- forces a fresh fetch every boot so pushed fixes actually land instead
-	-- of users running yesterday's source for hours.
-	local url = BASE .. path .. "?t=" .. tostring(os.time())
-	local ok, body = pcall(function() return game:HttpGet(url) end)
-	if not ok then
+	-- The querystring still helps for the HttpGet fallback path.
+	local url = BASE .. path .. "?t=" .. tostring(os.time()) .. "_" .. tostring(math.random(1, 99999))
+	local ok, body = pcall(httpFetch, url)
+	if not ok or not body or body == "" then
 		error("Vellum loader: HttpGet failed for " .. url .. " — " .. tostring(body), 0)
 	end
 	local fn, parseErr = loadstring(body, path)
