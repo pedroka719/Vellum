@@ -415,106 +415,108 @@ function UI.mount(opts)
 		return r
 	end
 
-	-- Dropdown row: label on left, current value on right, click expands a
-	-- vertical option panel below (pushes siblings down via a sizing trick:
-	-- the row itself grows when open). getF/setF read+write the selection.
-	-- options is an array of strings; selection MUST match one of them.
+	-- Dropdown row: label on left, value pill on right (shows current pick).
+	-- Click the pill → option list expands below; pick → row collapses.
+	-- The row container grows vertically when open so siblings push down
+	-- cleanly instead of overlapping.
 	function Builder.dropdownRow(parent, labelText, options, getF, setF)
-		local r = Builder.row(parent, 30)
-		-- Grow this row when open instead of overlapping siblings.
-		r.AutomaticSize = Enum.AutomaticSize.Y
-		r.Size = UDim2.new(1, -8, 0, 30)
-		r.ClipsDescendants = true
+		-- Outer container holds two stacked rows: header + (optional) panel.
+		-- It has its own UIListLayout to position them; AutomaticSize.Y grows
+		-- as the panel expands. NOT using Builder.row here because that adds
+		-- a row background — we want the background only on the header.
+		local container = Instance.new("Frame", parent)
+		container.Size = UDim2.new(1, -8, 0, 30)
+		container.AutomaticSize = Enum.AutomaticSize.Y
+		container.BackgroundTransparency = 1
+		container.BorderSizePixel = 0
 
-		local headerRow = Instance.new("Frame", r)
-		headerRow.Size = UDim2.new(1, 0, 0, 30)
-		headerRow.BackgroundTransparency = 1
-		headerRow.LayoutOrder = 0
+		local containerLayout = Instance.new("UIListLayout", container)
+		containerLayout.SortOrder = Enum.SortOrder.LayoutOrder
+		containerLayout.Padding = UDim.new(0, 2)
 
-		local l = Instance.new("TextLabel", headerRow)
+		-- Header (the always-visible row)
+		local header = Instance.new("Frame", container)
+		header.LayoutOrder = 0
+		header.Size = UDim2.new(1, 0, 0, 30)
+		Theme.bind(header, "BackgroundColor3", "row"); header.BorderSizePixel = 0
+		Instance.new("UICorner", header).CornerRadius = UDim.new(0, 4)
+
+		local l = Instance.new("TextLabel", header)
 		l.Size = UDim2.new(0.55, 0, 1, 0); l.Position = UDim2.fromOffset(12, 0)
 		l.BackgroundTransparency = 1; l.Text = labelText
 		l.Font = Enum.Font.Gotham; l.TextSize = 12
 		Theme.bind(l, "TextColor3", "text"); l.TextXAlignment = Enum.TextXAlignment.Left
 
-		local btn = Instance.new("TextButton", headerRow)
-		btn.Size = UDim2.new(0.4, -16, 0, 22); btn.Position = UDim2.new(0.55, 0, 0.5, -11)
-		Theme.bind(btn, "BackgroundColor3", "elev"); btn.AutoButtonColor = false
-		btn.Font = Enum.Font.GothamMedium; btn.TextSize = 11
-		Theme.bind(btn, "TextColor3", "text")
-		Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 4)
-		local btnStroke = Instance.new("UIStroke", btn)
-		Theme.bind(btnStroke, "Color", "stroke")
-		btnStroke.Thickness = 1; btnStroke.Transparency = 0.5
+		-- Value pill — empty Text so no default "Button" word leaks through.
+		local pill = Instance.new("TextButton", header)
+		pill.Size = UDim2.new(0.45, -20, 0, 22)
+		pill.Position = UDim2.new(0.55, 0, 0.5, -11)
+		Theme.bind(pill, "BackgroundColor3", "elev"); pill.AutoButtonColor = false
+		pill.Text = ""  -- ← the bug last time. don't let TextButton's default show.
+		Instance.new("UICorner", pill).CornerRadius = UDim.new(0, 4)
+		local pillStroke = Instance.new("UIStroke", pill)
+		Theme.bind(pillStroke, "Color", "stroke")
+		pillStroke.Thickness = 1; pillStroke.Transparency = 0.55
 
-		local arrow = Instance.new("TextLabel", btn)
-		arrow.Size = UDim2.new(0, 14, 1, 0); arrow.Position = UDim2.new(1, -16, 0, 0)
+		local valueLbl = Instance.new("TextLabel", pill)
+		valueLbl.Size = UDim2.new(1, -22, 1, 0)
+		valueLbl.Position = UDim2.fromOffset(10, 0)
+		valueLbl.BackgroundTransparency = 1
+		valueLbl.Font = Enum.Font.GothamMedium; valueLbl.TextSize = 11
+		Theme.bind(valueLbl, "TextColor3", "text")
+		valueLbl.TextXAlignment = Enum.TextXAlignment.Left
+		valueLbl.Text = tostring(getF() or options[1] or "")
+
+		local arrow = Instance.new("TextLabel", pill)
+		arrow.Size = UDim2.fromOffset(14, 22)
+		arrow.Position = UDim2.new(1, -16, 0, 0)
 		arrow.BackgroundTransparency = 1
 		arrow.Font = Enum.Font.Gotham; arrow.TextSize = 11
 		Theme.bind(arrow, "TextColor3", "textDim")
 		arrow.Text = "▾"
 
-		local labelInBtn = Instance.new("TextLabel", btn)
-		labelInBtn.Size = UDim2.new(1, -20, 1, 0); labelInBtn.Position = UDim2.fromOffset(8, 0)
-		labelInBtn.BackgroundTransparency = 1
-		labelInBtn.Font = Enum.Font.GothamMedium; labelInBtn.TextSize = 11
-		Theme.bind(labelInBtn, "TextColor3", "text")
-		labelInBtn.TextXAlignment = Enum.TextXAlignment.Left
-		labelInBtn.Text = tostring(getF() or options[1] or "")
-
-		-- options panel — initially hidden, grows when open
-		local panel = Instance.new("Frame", r)
+		-- Options panel (toggled by Visible — when hidden it contributes
+		-- zero height to the container's auto-size).
+		local panel = Instance.new("Frame", container)
 		panel.LayoutOrder = 1
-		panel.Size = UDim2.new(1, 0, 0, 0)
+		panel.Size = UDim2.new(1, 0, 0, #options * 26 + 2)
 		panel.BackgroundTransparency = 1
 		panel.Visible = false
 
-		local listLayout = Instance.new("UIListLayout", panel)
-		listLayout.SortOrder = Enum.SortOrder.LayoutOrder
-		listLayout.Padding = UDim.new(0, 2)
+		local panelLayout = Instance.new("UIListLayout", panel)
+		panelLayout.SortOrder = Enum.SortOrder.LayoutOrder
+		panelLayout.Padding = UDim.new(0, 2)
 
-		local rowListLayout = Instance.new("UIListLayout", r)
-		rowListLayout.SortOrder = Enum.SortOrder.LayoutOrder
-		rowListLayout.Padding = UDim.new(0, 4)
+		local isOpen = false
+		local function setOpen(state)
+			isOpen = state
+			panel.Visible = state
+			arrow.Text = state and "▴" or "▾"
+		end
 
-		local function close()
-			panel.Visible = false
-			arrow.Text = "▾"
-		end
-		local function open()
-			panel.Visible = true
-			arrow.Text = "▴"
-		end
-		local open_ = false
-		btn.MouseButton1Click:Connect(function()
-			open_ = not open_
-			if open_ then open() else close() end
-		end)
+		pill.MouseButton1Click:Connect(function() setOpen(not isOpen) end)
 
 		for i, opt in ipairs(options) do
 			local optBtn = Instance.new("TextButton", panel)
-			optBtn.Size = UDim2.new(1, -8, 0, 24); optBtn.LayoutOrder = i
+			optBtn.LayoutOrder = i
+			optBtn.Size = UDim2.new(1, 0, 0, 24)
 			Theme.bind(optBtn, "BackgroundColor3", "row")
 			optBtn.AutoButtonColor = false
 			optBtn.Font = Enum.Font.Gotham; optBtn.TextSize = 11
 			Theme.bind(optBtn, "TextColor3", "text")
-			optBtn.Text = "  " .. opt
+			optBtn.Text = "    " .. opt  -- left padding via text instead of UIPadding
 			optBtn.TextXAlignment = Enum.TextXAlignment.Left
 			Instance.new("UICorner", optBtn).CornerRadius = UDim.new(0, 4)
 			optBtn.MouseEnter:Connect(function() optBtn.BackgroundColor3 = Theme.token("elev") end)
 			optBtn.MouseLeave:Connect(function() optBtn.BackgroundColor3 = Theme.token("row") end)
 			optBtn.MouseButton1Click:Connect(function()
 				setF(opt)
-				labelInBtn.Text = opt
-				open_ = false
-				close()
+				valueLbl.Text = opt
+				setOpen(false)
 			end)
 		end
 
-		-- size panel based on layout once children populate
-		panel.Size = UDim2.new(1, 0, 0, (#options * 26) + 4)
-		close()  -- start closed
-		return r
+		return container
 	end
 
 	function Builder.actionBtn(parent, label, fn)

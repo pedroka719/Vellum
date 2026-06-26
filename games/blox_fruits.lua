@@ -104,17 +104,30 @@ function Module.start(lib)
 		sessionStart = os.clock(),
 	}
 
-	local SESSION_HASH = nil      -- captured from first real RegisterHit
+	-- The session hash lives in getgenv so script reloads inherit a hash
+	-- captured on a previous boot — user only swings M1 once per Roblox
+	-- session, not once per `loadstring` call.
 	local jwait = Helpers.makeJwait(cfg)
 	local safe = Helpers.makeSafe("Vellum BF")
 
 	-- ═══════════════════════════ PERSISTENT SPY ═══════════════════════════
-	-- Rolling log of last N remote calls. Captures the hash on first sight.
-	-- Freezes on detected punishment so we can post-mortem.
+	-- Rolling log + persistent session hash store. The __namecall hook is
+	-- installed once per Roblox session and writes captured hashes into
+	-- getgenv().VellumBF.hash, where every future BF module boot reads from.
 	getgenv().VellumBF = getgenv().VellumBF or {}
 	local SPY = getgenv().VellumBF
 	SPY.log = SPY.log or {}
 	SPY.frozen = false
+
+	-- read current hash (may be set from a prior boot)
+	local function getHash() return SPY.hash end
+
+	-- expose a way to wipe the hash (called from a UI button + on respawn,
+	-- since BF rotates the hash when the character respawns)
+	local function clearHash()
+		SPY.hash = nil
+		warn("[Vellum BF] session hash cleared — swing M1 to re-capture")
+	end
 
 	local function spyPush(row)
 		if SPY.frozen then return end
@@ -134,11 +147,12 @@ function Module.start(lib)
 				local nm = self.Name
 				local v = (select(1, ...))
 				if not (type(v) == "string" and POLL_NOISE[v]) then
-					-- session hash auto-capture: first real RegisterHit
-					if nm == "RE/RegisterHit" and not SESSION_HASH then
+					-- Hash capture: any real RegisterHit with a valid 8-hex
+					-- 4th arg. Stored in getgenv so reloads pick it up.
+					if nm == "RE/RegisterHit" and not SPY.hash then
 						local _, _, _, h = ...
 						if type(h) == "string" and #h == 8 then
-							SESSION_HASH = h
+							SPY.hash = h
 							warn("[Vellum BF] session hash captured:", h)
 						end
 					end
@@ -154,6 +168,10 @@ function Module.start(lib)
 		end)
 		SPY.hookInstalled = true
 	end
+
+	-- BF appears to keep the same hash across respawns in the same session,
+	-- but if that ever changes we'll observe it here and add a CharacterAdded
+	-- handler to clear. Left as a noted hook for now.
 
 	-- Punishment detection — if BF kicks us, surface the spy buffer.
 	game:GetService("LogService").MessageOut:Connect(function(msg, mtype)
@@ -204,9 +222,10 @@ function Module.start(lib)
 
 	local function attackOnce(enemy)
 		local part = pickPart(enemy)
-		if not part or not SESSION_HASH then return false end
+		local hash = getHash()
+		if not part or not hash then return false end
 		safe(function() R.RegisterAttack:FireServer(cfg.damageMultiplier) end)
-		safe(function() R.RegisterHit:FireServer(part, {}, nil, SESSION_HASH) end)
+		safe(function() R.RegisterHit:FireServer(part, {}, nil, hash) end)
 		return true
 	end
 
@@ -263,7 +282,7 @@ function Module.start(lib)
 
 	local function autoFarmLoop()
 		while gui.Parent do
-			if cfg.autoFarm and SESSION_HASH then
+			if cfg.autoFarm and getHash() then
 				safe(function()
 					local enemy = pickEnemy()
 					if not enemy then
@@ -370,7 +389,7 @@ function Module.start(lib)
 		function() return cfg.autoFarm end,
 		function(v)
 			cfg.autoFarm = v
-			if v and not SESSION_HASH then
+			if v and not getHash() then
 				Toast.show({
 					title = "Hash not captured yet",
 					body = "Take one M1 swing on any enemy so we can sniff the session hash, then re-enable.",
@@ -436,7 +455,7 @@ function Module.start(lib)
 				Helpers.fmt(stats.sessionXP), Helpers.perHour(stats.sessionXP, elapsed),
 				Helpers.fmt(stats.sessionBeli), Helpers.perHour(stats.sessionBeli, elapsed),
 				Helpers.fmtDur(elapsed),
-				SESSION_HASH or "(swing M1 once to capture)"
+				getHash() or "(swing M1 once to capture)"
 			)
 			task.wait(1)
 		end
@@ -454,6 +473,15 @@ function Module.start(lib)
 	ui.toggleRow(settings, "Persistent remote spy",
 		function() return cfg.spyEnabled end,
 		function(v) cfg.spyEnabled = v end)
+
+	ui.actionBtn(settings, "Forget session hash (force re-capture)", function()
+		clearHash()
+		Toast.show({
+			title = "Hash cleared",
+			body = "Swing M1 once on any enemy to capture a fresh hash.",
+			kind = "info", duration = 6,
+		})
+	end)
 
 	ui.actionBtn(settings, "Dump spy buffer to console", function()
 		print("=== Vellum BF spy buffer (" .. #SPY.log .. " entries) ===")
