@@ -686,18 +686,27 @@ function Module.start(lib)
 		function(v) cfg.espIslands = v; buildIslandESP() end)
 
 	ui.sectionLabel(sea1, "MANUAL TP")
-	-- Two-column scroll of island buttons. Direct CFrame TP (user-tested safe).
-	for _, island in ipairs(ISLANDS) do
-		ui.actionBtn(sea1, "TP to " .. island.name .. "  (" .. island.lvlRange .. ")", function()
-			local ok = tpToIsland(island.name)
+	-- Single dropdown of every Sea 1 island. Picking one fires the TP
+	-- and the toast shows the level range — same info as the old button
+	-- grid but a fraction of the screen weight.
+	local islandOptions = {}
+	for _, island in ipairs(ISLANDS) do table.insert(islandOptions, island.name) end
+
+	local lastTpDestination = "—"
+	ui.dropdownRow(sea1, "Teleport to",
+		islandOptions,
+		function() return lastTpDestination end,
+		function(name)
+			lastTpDestination = name
+			local ok = tpToIsland(name)
+			local island = ISLAND_BY_NAME[name]
 			Toast.show({
-				title = ok and ("Teleported") or "TP failed",
-				body  = island.name,
+				title = ok and "Teleported" or "TP failed",
+				body  = name .. (island and ("  •  " .. island.lvlRange) or ""),
 				kind  = ok and "success" or "warn", duration = 3,
-				key   = "tp:" .. island.name,
+				key   = "tp:" .. name,
 			})
 		end)
-	end
 
 	-- ─── STATS TAB ───
 	local statsPage = ui.newPage("stats")
