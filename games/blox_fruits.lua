@@ -698,12 +698,20 @@ function Module.start(lib)
 		function() return lastTpDestination end,
 		function(name)
 			lastTpDestination = name
+			-- Manual override: if Auto Sea 1 was on it would yank us back
+			-- on the next tick (3s loop). User clearly wants manual control.
+			local wasAuto = cfg.autoSea1
+			if wasAuto then
+				cfg.autoSea1 = false
+				autoSeaState.lastQuestKey = nil
+			end
 			local ok = tpToIsland(name)
 			local island = ISLAND_BY_NAME[name]
 			Toast.show({
 				title = ok and "Teleported" or "TP failed",
-				body  = name .. (island and ("  •  " .. island.lvlRange) or ""),
-				kind  = ok and "success" or "warn", duration = 3,
+				body  = name .. (island and ("  •  " .. island.lvlRange) or "") ..
+				        (wasAuto and "  (Auto Sea 1 paused)" or ""),
+				kind  = ok and "success" or "warn", duration = 4,
 				key   = "tp:" .. name,
 			})
 		end)
