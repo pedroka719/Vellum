@@ -74,13 +74,14 @@ function Module.start(lib)
 
 		-- farm
 		autoFarm = false,
-		farmHeight = 8,             -- studs above target (safe farm)
+		farmHeight = 10,            -- studs above target (safe farm)
 		farmTweenSpeed = 350,       -- studs/sec; under the 1500 velocity cap
 		attackCadence = 0.18,       -- sec between RegisterAttack/Hit pairs
 		damageMultiplier = 1.0,     -- 1.0 = always finisher hits
 		farmLevelMin = 0,           -- only attack enemies within range
 		farmLevelMax = 9999,
 		farmTargetName = "",        -- "" = any enemy. Set to "Bandit" etc.
+		aggressiveRange = false,    -- pull target under us each tick (ignores server range)
 
 		-- stat allocation
 		autoStats = false,
@@ -259,13 +260,16 @@ function Module.start(lib)
 	-- ═══════════════════════════ LOOPS ═══════════════════════════
 
 	-- Smooth-follow: Heartbeat-driven damped lerp toward the hover target.
-	-- No tween / no per-tick CFrame snap. Damping factor 10 means we close
-	-- ~63% of the gap each second, so the camera reads as floaty pursuit
-	-- instead of teleport jitter. Disconnect cleanly when the target dies
-	-- or auto-farm flips off, otherwise we'd burn CPU forever.
+	-- Position-only offset (NOT ehrp.CFrame * offset) so the bandit's
+	-- rotation doesn't drag us in an orbit around them. Damping factor 10
+	-- means we close ~63% of the gap each second — reads as floaty pursuit,
+	-- not teleport jitter. When aggressive mode is on we also write the
+	-- bandit's HRP under the player so we can attack from arbitrary height.
 	local hoverConn
+	local savedTargetCFrame  -- so we can release the bandit when done
 	local function stopHover()
 		if hoverConn then hoverConn:Disconnect(); hoverConn = nil end
+		savedTargetCFrame = nil
 	end
 	local function startHover(enemy)
 		stopHover()
@@ -275,8 +279,16 @@ function Module.start(lib)
 			local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
 			local ehrp = enemy:FindFirstChild("HumanoidRootPart")
 			if not (hrp and ehrp) then return end
-			local desired = ehrp.CFrame * CFrame.new(0, cfg.farmHeight, 0)
+
+			-- pure-position desired spot (no rotation contamination)
+			local desired = CFrame.new(ehrp.Position + Vector3.new(0, cfg.farmHeight, 0))
 			hrp.CFrame = hrp.CFrame:Lerp(desired, math.min(1, dt * 10))
+
+			-- aggressive: bring target under us each tick, ignore server range
+			if cfg.aggressiveRange then
+				if not savedTargetCFrame then savedTargetCFrame = ehrp.CFrame end
+				ehrp.CFrame = hrp.CFrame * CFrame.new(0, -3, 0)
+			end
 		end)
 	end
 
@@ -404,7 +416,10 @@ function Module.start(lib)
 	ui.intervalRow(farm, "Hover height (studs)",
 		function() return cfg.farmHeight end,
 		function(v) cfg.farmHeight = v end,
-		{ 4, 6, 8, 10, 14 })
+		{ 6, 10, 14, 20, 30, 50 })
+	ui.toggleRow(farm, "Aggressive range (pull target to you)",
+		function() return cfg.aggressiveRange end,
+		function(v) cfg.aggressiveRange = v end)
 	ui.intervalRow(farm, "Tween speed (studs/sec)",
 		function() return cfg.farmTweenSpeed end,
 		function(v) cfg.farmTweenSpeed = v end,
