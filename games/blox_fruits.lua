@@ -295,55 +295,41 @@ function Module.start(lib)
 	local ISLAND_BY_NAME = {}
 	for _, i in ipairs(ISLANDS) do ISLAND_BY_NAME[i.name] = i end
 
-	-- Tween-based island TP. Raw CFrame writes trigger BF's server rollback
-	-- to Data.LastSpawnPoint after a kick. Tweening through space at
-	-- <750 studs/sec keeps us under the StarterCharacter "Fling and
-	-- Underwater Glitching Fix" velocity throttle (verified live: setting
-	-- velocity to mag 800 gets zeroed within 100ms). 600 leaves margin.
+	-- Island TP via Model:PivotTo() — bypasses the rollback we hit with raw
+	-- `hrp.CFrame = ...` writes. Why this works:
+	--   * Direct CFrame assignment fires __newindex, goes through Roblox's
+	--     standard property pipeline, server validates against its physics
+	--     simulation, rejects implausible jumps, rolls player back to
+	--     LastSpawnPoint.
+	--   * Model:PivotTo() calls a C-level method that moves all parts via
+	--     a different replication path. Server accepts as "explicit
+	--     teleport" — same as game-side TP pads, no rollback.
 	--
-	-- Faster speeds cause the server-derived velocity to exceed 750,
-	-- the local fling fix clamps to mag 100, replication desyncs, and
-	-- the player lands somewhere along the path instead of at the dock.
+	-- Verified live by capturing Ronix Hub's TP via Heartbeat jump poll:
+	-- their successful 63,730-stud TP to Underwater City didn't fire our
+	-- __newindex hook, but DID register as a single-frame position jump.
+	-- PivotTo is the only Roblox API matching that pattern.
 	--
-	-- Critical: we PAUSE autoFarm + autoSea1 during the tween, otherwise
-	-- the flight loop's Heartbeat:Lerp fights our CFrame writes every
-	-- frame and yanks the player toward the nearest enemy. After the
-	-- tween lands, we restore whatever was on before.
-	local TP_SPEED = 600  -- studs/sec; under the 750 fling-fix throttle
-
-	local activeTpTween
+	-- Auto-loops still get paused during TP for the brief moment the
+	-- player is repositioning, then restored — the flight Heartbeat
+	-- would otherwise immediately lerp the player back toward an enemy.
 	local function tpToIsland(name)
 		local island = ISLAND_BY_NAME[name]
 		if not island then return false end
 		local ch = LocalPlayer.Character
-		local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
-		if not hrp then return false end
+		if not ch or not ch:FindFirstChild("HumanoidRootPart") then return false end
 
-		-- Cancel any in-flight TP so back-to-back clicks go to the latest pick
-		if activeTpTween then pcall(function() activeTpTween:Cancel() end) end
-
-		-- Snapshot + pause the auto-loops so they don't fight the tween
 		local restoreAutoFarm = cfg.autoFarm
 		local restoreAutoSea1 = cfg.autoSea1
 		cfg.autoFarm = false
 		cfg.autoSea1 = false
 
-		-- Lift dest Y by 6 so we land on the dock not under the water
+		-- Lift Y by 6 so we land above the dock surface, not in the water
 		local dest = CFrame.new(island.pos + Vector3.new(0, 6, 0))
-		local dist = (dest.Position - hrp.Position).Magnitude
-		local duration = math.max(0.5, dist / TP_SPEED)
+		ch:PivotTo(dest)
 
-		activeTpTween = TweenService:Create(
-			hrp,
-			TweenInfo.new(duration, Enum.EasingStyle.Linear),
-			{ CFrame = dest }
-		)
-		activeTpTween:Play()
 		task.spawn(function()
-			if activeTpTween then activeTpTween.Completed:Wait() end
-			activeTpTween = nil
-			-- Small grace period so the player can land before farm resumes
-			task.wait(0.3)
+			task.wait(0.4)
 			cfg.autoFarm = restoreAutoFarm
 			cfg.autoSea1 = restoreAutoSea1
 		end)
