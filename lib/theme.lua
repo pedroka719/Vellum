@@ -120,8 +120,14 @@ function Theme.apply(name)
 		local a, prop = entry[1], entry[2]
 		if prop == "_call" then
 			pcall(a)
-		elseif a.Parent then
-			pcall(function() a[prop] = THEME[entry[3]] end)
+		else
+			-- a.Parent itself can throw "lacking capability Plugin" on Volt
+			-- when the instance lives in gethui(), so the whole touch goes
+			-- inside the pcall. A live-but-detached instance is a no-op —
+			-- it'll get repainted next swap if it ever re-parents.
+			pcall(function()
+				if a.Parent then a[prop] = THEME[entry[3]] end
+			end)
 		end
 	end
 	return true
