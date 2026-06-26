@@ -238,41 +238,68 @@ function Module.start(lib)
 	end
 
 	-- ═══════════════════════════ LOOPS ═══════════════════════════
+
+	-- Smooth-follow: Heartbeat-driven damped lerp toward the hover target.
+	-- No tween / no per-tick CFrame snap. Damping factor 10 means we close
+	-- ~63% of the gap each second, so the camera reads as floaty pursuit
+	-- instead of teleport jitter. Disconnect cleanly when the target dies
+	-- or auto-farm flips off, otherwise we'd burn CPU forever.
+	local hoverConn
+	local function stopHover()
+		if hoverConn then hoverConn:Disconnect(); hoverConn = nil end
+	end
+	local function startHover(enemy)
+		stopHover()
+		hoverConn = RunService.Heartbeat:Connect(function(dt)
+			if not (cfg.autoFarm and enemy and enemy.Parent) then stopHover(); return end
+			local ch = LocalPlayer.Character
+			local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+			local ehrp = enemy:FindFirstChild("HumanoidRootPart")
+			if not (hrp and ehrp) then return end
+			local desired = ehrp.CFrame * CFrame.new(0, cfg.farmHeight, 0)
+			hrp.CFrame = hrp.CFrame:Lerp(desired, math.min(1, dt * 10))
+		end)
+	end
+
 	local function autoFarmLoop()
 		while gui.Parent do
 			if cfg.autoFarm and SESSION_HASH then
 				safe(function()
 					local enemy = pickEnemy()
-					if not enemy then jwait(0.5); return end
+					if not enemy then
+						stopHover()
+						jwait(0.5); return
+					end
 
-					-- safe-farm position: N studs above target
-					local target = enemy.HumanoidRootPart.CFrame * CFrame.new(0, cfg.farmHeight, 0)
-					tweenTo(target)
+					-- Long-distance approach: tween smoothly toward the hover
+					-- spot. Once there, hand off to the Heartbeat follower.
+					local approachCF = enemy.HumanoidRootPart.CFrame * CFrame.new(0, cfg.farmHeight, 0)
+					tweenTo(approachCF)
+					-- wait until we're near (or 1.5s timeout if path blocked)
+					local t0 = os.clock()
+					repeat
+						task.wait(0.05)
+						local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+						local ehrp = enemy:FindFirstChild("HumanoidRootPart")
+						if hrp and ehrp and (hrp.Position - (ehrp.Position + Vector3.new(0, cfg.farmHeight, 0))).Magnitude < 6 then break end
+					until os.clock() - t0 > 1.5 or not (enemy and enemy.Parent and cfg.autoFarm)
+
+					startHover(enemy)
 
 					local guard = 0
-					while enemy.Parent and cfg.autoFarm and guard < 100 do
-						-- maintain hover even as target moves
-						local ehrp = enemy:FindFirstChild("HumanoidRootPart")
-						if not ehrp then break end
-						local ch = LocalPlayer.Character
-						local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
-						if hrp then
-							local desired = ehrp.CFrame * CFrame.new(0, cfg.farmHeight, 0)
-							if (hrp.Position - desired.Position).Magnitude > 4 then
-								-- nudge hover without full re-tween every tick
-								hrp.CFrame = desired
-							end
-						end
+					while enemy.Parent and cfg.autoFarm and guard < 200 do
 						attackOnce(enemy)
 						guard = guard + 1
 						jwait(cfg.attackCadence)
 					end
+					stopHover()
 
 					if enemy and not enemy.Parent then
 						stats.sessionKills = stats.sessionKills + 1
 					end
 				end)
 			else
+				stopHover()
 				jwait(0.5)
 			end
 		end
@@ -381,16 +408,10 @@ function Module.start(lib)
 		function() return cfg.autoStats end,
 		function(v) cfg.autoStats = v end)
 
-	local statBtn = ui.actionBtn(statsPage, "Stat priority: " .. cfg.statPriority, function() end)
-	do
-		local order = { "Melee", "Defense", "Sword", "Gun", "Demon Fruit" }
-		statBtn.MouseButton1Click:Connect(function()
-			local idx = 1
-			for i, n in ipairs(order) do if n == cfg.statPriority then idx = i; break end end
-			cfg.statPriority = order[(idx % #order) + 1]
-			statBtn.Text = "Stat priority: " .. cfg.statPriority
-		end)
-	end
+	ui.dropdownRow(statsPage, "Stat priority",
+		{ "Melee", "Defense", "Sword", "Gun", "Demon Fruit" },
+		function() return cfg.statPriority end,
+		function(v) cfg.statPriority = v end)
 
 	ui.sectionLabel(statsPage, "SESSION")
 	local sessionLbl = Instance.new("TextLabel", statsPage)

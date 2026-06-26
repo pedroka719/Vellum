@@ -415,6 +415,108 @@ function UI.mount(opts)
 		return r
 	end
 
+	-- Dropdown row: label on left, current value on right, click expands a
+	-- vertical option panel below (pushes siblings down via a sizing trick:
+	-- the row itself grows when open). getF/setF read+write the selection.
+	-- options is an array of strings; selection MUST match one of them.
+	function Builder.dropdownRow(parent, labelText, options, getF, setF)
+		local r = Builder.row(parent, 30)
+		-- Grow this row when open instead of overlapping siblings.
+		r.AutomaticSize = Enum.AutomaticSize.Y
+		r.Size = UDim2.new(1, -8, 0, 30)
+		r.ClipsDescendants = true
+
+		local headerRow = Instance.new("Frame", r)
+		headerRow.Size = UDim2.new(1, 0, 0, 30)
+		headerRow.BackgroundTransparency = 1
+		headerRow.LayoutOrder = 0
+
+		local l = Instance.new("TextLabel", headerRow)
+		l.Size = UDim2.new(0.55, 0, 1, 0); l.Position = UDim2.fromOffset(12, 0)
+		l.BackgroundTransparency = 1; l.Text = labelText
+		l.Font = Enum.Font.Gotham; l.TextSize = 12
+		Theme.bind(l, "TextColor3", "text"); l.TextXAlignment = Enum.TextXAlignment.Left
+
+		local btn = Instance.new("TextButton", headerRow)
+		btn.Size = UDim2.new(0.4, -16, 0, 22); btn.Position = UDim2.new(0.55, 0, 0.5, -11)
+		Theme.bind(btn, "BackgroundColor3", "elev"); btn.AutoButtonColor = false
+		btn.Font = Enum.Font.GothamMedium; btn.TextSize = 11
+		Theme.bind(btn, "TextColor3", "text")
+		Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 4)
+		local btnStroke = Instance.new("UIStroke", btn)
+		Theme.bind(btnStroke, "Color", "stroke")
+		btnStroke.Thickness = 1; btnStroke.Transparency = 0.5
+
+		local arrow = Instance.new("TextLabel", btn)
+		arrow.Size = UDim2.new(0, 14, 1, 0); arrow.Position = UDim2.new(1, -16, 0, 0)
+		arrow.BackgroundTransparency = 1
+		arrow.Font = Enum.Font.Gotham; arrow.TextSize = 11
+		Theme.bind(arrow, "TextColor3", "textDim")
+		arrow.Text = "▾"
+
+		local labelInBtn = Instance.new("TextLabel", btn)
+		labelInBtn.Size = UDim2.new(1, -20, 1, 0); labelInBtn.Position = UDim2.fromOffset(8, 0)
+		labelInBtn.BackgroundTransparency = 1
+		labelInBtn.Font = Enum.Font.GothamMedium; labelInBtn.TextSize = 11
+		Theme.bind(labelInBtn, "TextColor3", "text")
+		labelInBtn.TextXAlignment = Enum.TextXAlignment.Left
+		labelInBtn.Text = tostring(getF() or options[1] or "")
+
+		-- options panel — initially hidden, grows when open
+		local panel = Instance.new("Frame", r)
+		panel.LayoutOrder = 1
+		panel.Size = UDim2.new(1, 0, 0, 0)
+		panel.BackgroundTransparency = 1
+		panel.Visible = false
+
+		local listLayout = Instance.new("UIListLayout", panel)
+		listLayout.SortOrder = Enum.SortOrder.LayoutOrder
+		listLayout.Padding = UDim.new(0, 2)
+
+		local rowListLayout = Instance.new("UIListLayout", r)
+		rowListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+		rowListLayout.Padding = UDim.new(0, 4)
+
+		local function close()
+			panel.Visible = false
+			arrow.Text = "▾"
+		end
+		local function open()
+			panel.Visible = true
+			arrow.Text = "▴"
+		end
+		local open_ = false
+		btn.MouseButton1Click:Connect(function()
+			open_ = not open_
+			if open_ then open() else close() end
+		end)
+
+		for i, opt in ipairs(options) do
+			local optBtn = Instance.new("TextButton", panel)
+			optBtn.Size = UDim2.new(1, -8, 0, 24); optBtn.LayoutOrder = i
+			Theme.bind(optBtn, "BackgroundColor3", "row")
+			optBtn.AutoButtonColor = false
+			optBtn.Font = Enum.Font.Gotham; optBtn.TextSize = 11
+			Theme.bind(optBtn, "TextColor3", "text")
+			optBtn.Text = "  " .. opt
+			optBtn.TextXAlignment = Enum.TextXAlignment.Left
+			Instance.new("UICorner", optBtn).CornerRadius = UDim.new(0, 4)
+			optBtn.MouseEnter:Connect(function() optBtn.BackgroundColor3 = Theme.token("elev") end)
+			optBtn.MouseLeave:Connect(function() optBtn.BackgroundColor3 = Theme.token("row") end)
+			optBtn.MouseButton1Click:Connect(function()
+				setF(opt)
+				labelInBtn.Text = opt
+				open_ = false
+				close()
+			end)
+		end
+
+		-- size panel based on layout once children populate
+		panel.Size = UDim2.new(1, 0, 0, (#options * 26) + 4)
+		close()  -- start closed
+		return r
+	end
+
 	function Builder.actionBtn(parent, label, fn)
 		local b = Instance.new("TextButton", parent)
 		b.Size = UDim2.new(1, -8, 0, 28)
