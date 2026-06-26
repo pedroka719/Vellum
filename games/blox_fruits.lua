@@ -319,7 +319,26 @@ function Module.start(lib)
 		-- newest pick instead of fighting the previous one.
 		if activeTpTween then pcall(function() activeTpTween:Cancel() end) end
 
-		local dest = CFrame.new(Vector3.new(island.pos.X, island.pos.Y + 30, island.pos.Z))
+		-- Pre-raycast to find the actual ground position. The post-tween
+		-- "drop to ground" approach was itself a raw CFrame write — for tall
+		-- islands like Fountain City (bbox top 578, ground ~290) that's a
+		-- 300-stud Y jump that the server treats as a TP and rolls back.
+		-- StreamingEnabled is false in BF so we can raycast from anywhere.
+		local params = RaycastParams.new()
+		params.FilterType = Enum.RaycastFilterType.Exclude
+		params.FilterDescendantsInstances = { ch }
+		local rayOrigin = Vector3.new(island.pos.X, island.pos.Y + 30, island.pos.Z)
+		local result = workspace:Raycast(rayOrigin, Vector3.new(0, -800, 0), params)
+
+		local landingPos
+		if result then
+			landingPos = result.Position + Vector3.new(0, 4, 0)
+		else
+			-- Fallback: bbox top + small lift. Better than dropping into a hole.
+			landingPos = Vector3.new(island.pos.X, island.pos.Y + 4, island.pos.Z)
+		end
+
+		local dest = CFrame.new(landingPos)
 		local dist = (dest.Position - hrp.Position).Magnitude
 		local duration = math.max(0.5, dist / TP_SPEED)
 
@@ -329,24 +348,11 @@ function Module.start(lib)
 			{ CFrame = dest }
 		)
 		activeTpTween:Play()
-
+		-- Clear the handle once the tween finishes so the next call doesn't
+		-- think there's something to cancel.
 		task.spawn(function()
-			activeTpTween.Completed:Wait()
+			if activeTpTween then activeTpTween.Completed:Wait() end
 			activeTpTween = nil
-
-			-- Now raycast for ground and drop the player on it. Bbox top
-			-- guarantees we're above everything; 800-stud ray finds the
-			-- walkable surface even for tall islands.
-			local params = RaycastParams.new()
-			params.FilterType = Enum.RaycastFilterType.Exclude
-			params.FilterDescendantsInstances = { ch }
-
-			local origin = dest.Position
-			local result = workspace:Raycast(origin, Vector3.new(0, -800, 0), params)
-			if result and hrp.Parent then
-				hrp.CFrame = CFrame.new(result.Position + Vector3.new(0, 4, 0))
-				hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-			end
 		end)
 		return true
 	end
