@@ -37,6 +37,10 @@ function Module.start(lib)
 
 	local LocalPlayer = Players.LocalPlayer
 
+	-- Forward-declare so the loop closures below capture this as an upvalue
+	-- instead of a global nil. The assignment happens after UI.mount().
+	local gui
+
 	-- ═══════════════════════════ R TABLE ═══════════════════════════
 	-- Resolved once. If any of these is nil at boot, the script aborts loudly
 	-- — better than silent failure deep in a loop.
@@ -328,7 +332,7 @@ function Module.start(lib)
 		size     = UDim2.fromOffset(560, 400),
 		position = UDim2.fromOffset(80, 100),
 	})
-	local gui = ui.gui
+	gui = ui.gui  -- now assignable, captured as upvalue by the loops above
 
 	Toast.init({ theme = Theme, enabled = function() return cfg.notifyInGame end })
 
