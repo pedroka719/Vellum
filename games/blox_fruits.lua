@@ -295,18 +295,19 @@ function Module.start(lib)
 	local ISLAND_BY_NAME = {}
 	for _, i in ipairs(ISLANDS) do ISLAND_BY_NAME[i.name] = i end
 
-	-- Streaming-safe island TP. The naive "CFrame to island.pos + 4" path
-	-- works for the local island but fails on anything far away — the
-	-- chunk hasn't streamed in yet, the player falls through air past
-	-- FallenPartsDestroyHeight, and BF respawns them at their saved
-	-- SpawnPoint (which is why every "TP somewhere new" went back to
-	-- Pirate Starter).
+	-- Tween-based island TP. Raw CFrame writes trigger BF's server-side
+	-- position rollback after kicks — the server snaps you back to
+	-- Data.LastSpawnPoint. Tweening through space at <1000 studs/sec
+	-- looks like fast travel, never trips the rollback. We aim 30 studs
+	-- above the island bbox top, then raycast and drop to ground once
+	-- the tween lands.
 	--
-	-- The robust path:
-	--   1. Drop player 80 studs above the island marker
-	--   2. Anchor the HRP so they stay there while chunks load
-	--   3. Raycast down every 0.2s looking for ground; once found, unanchor
-	--      and place the player on it. 4s timeout for safety.
+	-- The tween duration is "distance / TP_SPEED" so far islands take
+	-- a few seconds (Underwater City at 60k studs = ~60s). Caller can
+	-- preempt by clicking another TP — the active tween is cancelled.
+	local TP_SPEED = 1000  -- studs/sec; under the 1500 velocity cap
+
+	local activeTpTween
 	local function tpToIsland(name)
 		local island = ISLAND_BY_NAME[name]
 		if not island then return false end
@@ -314,40 +315,36 @@ function Module.start(lib)
 		local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
 		if not hrp then return false end
 
-		-- 30 studs above bbox top is comfortable headroom for the raycast.
-		local safeY = island.pos.Y + 30
-		local aboveCF = CFrame.new(Vector3.new(island.pos.X, safeY, island.pos.Z))
-		hrp.CFrame = aboveCF
-		hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-		hrp.Anchored = true
+		-- Cancel any in-flight TP so back-to-back clicks always go to the
+		-- newest pick instead of fighting the previous one.
+		if activeTpTween then pcall(function() activeTpTween:Cancel() end) end
+
+		local dest = CFrame.new(Vector3.new(island.pos.X, island.pos.Y + 30, island.pos.Z))
+		local dist = (dest.Position - hrp.Position).Magnitude
+		local duration = math.max(0.5, dist / TP_SPEED)
+
+		activeTpTween = TweenService:Create(
+			hrp,
+			TweenInfo.new(duration, Enum.EasingStyle.Linear),
+			{ CFrame = dest }
+		)
+		activeTpTween:Play()
 
 		task.spawn(function()
-			-- Filter the player's character out so the raycast doesn't hit
-			-- our own HRP/limbs and report them as "ground".
+			activeTpTween.Completed:Wait()
+			activeTpTween = nil
+
+			-- Now raycast for ground and drop the player on it. Bbox top
+			-- guarantees we're above everything; 800-stud ray finds the
+			-- walkable surface even for tall islands.
 			local params = RaycastParams.new()
 			params.FilterType = Enum.RaycastFilterType.Exclude
 			params.FilterDescendantsInstances = { ch }
-			params.IgnoreWater = false  -- water counts as ground for underwater islands
 
-			local t0 = os.clock()
-			local groundPos
-			repeat
-				task.wait(0.15)
-				local origin = Vector3.new(island.pos.X, safeY, island.pos.Z)
-				-- 800 studs of range covers any island including sky-high tops
-				local result = workspace:Raycast(origin, Vector3.new(0, -800, 0), params)
-				if result then groundPos = result.Position end
-			until groundPos or (os.clock() - t0 > 3)
-
-			-- Fallback: if we couldn't find ground (extremely unlikely with
-			-- corrected coords), put them at the bbox top +2 — still
-			-- standable, definitely not in the ocean.
-			if not groundPos then
-				groundPos = Vector3.new(island.pos.X, island.pos.Y + 2, island.pos.Z)
-			end
-			if hrp and hrp.Parent then
-				hrp.CFrame = CFrame.new(groundPos + Vector3.new(0, 5, 0))
-				hrp.Anchored = false
+			local origin = dest.Position
+			local result = workspace:Raycast(origin, Vector3.new(0, -800, 0), params)
+			if result and hrp.Parent then
+				hrp.CFrame = CFrame.new(result.Position + Vector3.new(0, 4, 0))
 				hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
 			end
 		end)
