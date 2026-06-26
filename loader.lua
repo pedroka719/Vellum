@@ -120,6 +120,7 @@ local function boot()
 	-- Keys are PlaceIds; values are module paths under the repo root.
 	local GAMES = {
 		[112490729816320] = "/games/soccer_card.lua",
+		[2753915549]      = "/games/blox_fruits.lua",
 	}
 
 	local modulePath = GAMES[game.PlaceId]
