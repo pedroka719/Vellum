@@ -29,7 +29,10 @@ local _moduleCache = {}
 
 local function fetchModule(path)
 	if _moduleCache[path] then return _moduleCache[path] end
-	local url = BASE .. path
+	-- Roblox HttpGet caches responses aggressively. A query-string buster
+	-- forces a fresh fetch every boot so pushed fixes actually land instead
+	-- of users running yesterday's source for hours.
+	local url = BASE .. path .. "?t=" .. tostring(os.time())
 	local ok, body = pcall(function() return game:HttpGet(url) end)
 	if not ok then
 		error("Vellum loader: HttpGet failed for " .. url .. " — " .. tostring(body), 0)
