@@ -266,45 +266,44 @@ function Module.start(lib)
 	end
 
 	-- ═══════════════════════════ ISLAND MAP ═══════════════════════════
-	-- Sea 1 destinations. Coordinates are the TOP CENTER of each island's
-	-- bounding box in workspace.Map/* — placing the player there guarantees
-	-- they're above all geometry, the raycast finds the walkable surface,
-	-- and we drop them safely on it.
+	-- Sea 1 destinations. Coordinates come from the game's own Locations
+	-- folder CFrames (workspace._WorldOrigin.Locations.<island>.CFrame) —
+	-- these are the literal positions BF uses to register "you're at this
+	-- island". They sit at sea-level for ground islands and at the actual
+	-- altitude for sky islands.
 	--
-	-- The Locations folder (workspace._WorldOrigin.Locations) we used at
-	-- first holds detection-zone markers at sea level — useless as spawn
-	-- targets because the bbox of e.g. Fountain City peaks at Y=578 while
-	-- the Locations marker sits at Y=-13 (in the water).
+	-- We lift Y by 6 in the tween so the player lands ON the dock, not
+	-- under the water. Surface-finding via raycast was abandoned because
+	-- the post-tween CFrame jump triggered BF's server rollback.
 	local ISLANDS = {
-		{ name = "Pirate Starter",  pos = Vector3.new(1017, 91,  1440),  lvlRange = "Lv 1-9"     },
-		{ name = "Marine Starter",  pos = Vector3.new(-2920, 220, 2093), lvlRange = "Lv 1-9"     },
-		{ name = "Middle Town",     pos = Vector3.new(-832, 88,  1616),  lvlRange = "Lv 10-14"   },
-		{ name = "Jungle",          pos = Vector3.new(-1454, 144, -57),  lvlRange = "Lv 15-29"   },
-		{ name = "Pirate Village",  pos = Vector3.new(-1145, 123, 4138), lvlRange = "Lv 30-59"   },
-		{ name = "Desert",          pos = Vector3.new(1215, 90,  4344),  lvlRange = "Lv 60-89"   },
-		{ name = "Frozen Village",  pos = Vector3.new(1246, 136, -1432), lvlRange = "Lv 90-119"  },
-		{ name = "Marine Fortress", pos = Vector3.new(-4907, 355, 4285), lvlRange = "Lv 120-149" },
-		{ name = "Skylands",        pos = Vector3.new(-4658, 997, -1801),lvlRange = "Lv 150-249" },
-		{ name = "Prison",          pos = Vector3.new(5270, 167, 749),   lvlRange = "Lv 250-324" },
-		{ name = "Colosseum",       pos = Vector3.new(-1687, 141, -3184),lvlRange = "PvP"        },
-		{ name = "Magma Village",   pos = Vector3.new(-5555, 306, 8632), lvlRange = "Lv 325-449" },
-		{ name = "Underwater City", pos = Vector3.new(61399, 377, 1450), lvlRange = "Lv 450-624" },
-		{ name = "Fountain City",   pos = Vector3.new(5684, 578, 4402),  lvlRange = "Lv 625-749" },
+		{ name = "Pirate Starter",  pos = Vector3.new(1014, 16,  1462),  lvlRange = "Lv 1-9"     },
+		{ name = "Marine Starter",  pos = Vector3.new(-2921, -4,  2111), lvlRange = "Lv 1-9"     },
+		{ name = "Middle Town",     pos = Vector3.new(-833, 3,    1628), lvlRange = "Lv 10-14"   },
+		{ name = "Jungle",          pos = Vector3.new(-1419, 3,   -76),  lvlRange = "Lv 15-29"   },
+		{ name = "Pirate Village",  pos = Vector3.new(-1133, 3,   4176), lvlRange = "Lv 30-59"   },
+		{ name = "Desert",          pos = Vector3.new(1193, -7,   4430), lvlRange = "Lv 60-89"   },
+		{ name = "Frozen Village",  pos = Vector3.new(1276, -7,  -1472), lvlRange = "Lv 90-119"  },
+		{ name = "Marine Fortress", pos = Vector3.new(-4935, -7,  4318), lvlRange = "Lv 120-149" },
+		{ name = "Skylands",        pos = Vector3.new(-4622, 837, -1817),lvlRange = "Lv 150-249" },
+		{ name = "Prison",          pos = Vector3.new(5277, -7,    743), lvlRange = "Lv 250-324" },
+		{ name = "Colosseum",       pos = Vector3.new(-1685, -7, -3200), lvlRange = "PvP"        },
+		{ name = "Magma Village",   pos = Vector3.new(-5528, -7,  8691), lvlRange = "Lv 325-449" },
+		{ name = "Underwater City", pos = Vector3.new(61379, -7,  1473), lvlRange = "Lv 450-624" },
+		{ name = "Fountain City",   pos = Vector3.new(5717, -7,   4356), lvlRange = "Lv 625-749" },
 	}
 
 	local ISLAND_BY_NAME = {}
 	for _, i in ipairs(ISLANDS) do ISLAND_BY_NAME[i.name] = i end
 
-	-- Tween-based island TP. Raw CFrame writes trigger BF's server-side
-	-- position rollback after kicks — the server snaps you back to
-	-- Data.LastSpawnPoint. Tweening through space at <1000 studs/sec
-	-- looks like fast travel, never trips the rollback. We aim 30 studs
-	-- above the island bbox top, then raycast and drop to ground once
-	-- the tween lands.
+	-- Tween-based island TP. Raw CFrame writes trigger BF's server rollback
+	-- to Data.LastSpawnPoint after a kick. Tweening through space at
+	-- <1000 studs/sec looks like fast travel, no rollback. Land directly
+	-- on the dock (sea-level Y + 6 lift).
 	--
-	-- The tween duration is "distance / TP_SPEED" so far islands take
-	-- a few seconds (Underwater City at 60k studs = ~60s). Caller can
-	-- preempt by clicking another TP — the active tween is cancelled.
+	-- Critical: we PAUSE autoFarm + autoSea1 during the tween, otherwise
+	-- the flight loop's Heartbeat:Lerp fights our CFrame writes every
+	-- frame and yanks the player toward the nearest enemy. After the
+	-- tween lands, we restore whatever was on before.
 	local TP_SPEED = 1000  -- studs/sec; under the 1500 velocity cap
 
 	local activeTpTween
@@ -315,30 +314,17 @@ function Module.start(lib)
 		local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
 		if not hrp then return false end
 
-		-- Cancel any in-flight TP so back-to-back clicks always go to the
-		-- newest pick instead of fighting the previous one.
+		-- Cancel any in-flight TP so back-to-back clicks go to the latest pick
 		if activeTpTween then pcall(function() activeTpTween:Cancel() end) end
 
-		-- Pre-raycast to find the actual ground position. The post-tween
-		-- "drop to ground" approach was itself a raw CFrame write — for tall
-		-- islands like Fountain City (bbox top 578, ground ~290) that's a
-		-- 300-stud Y jump that the server treats as a TP and rolls back.
-		-- StreamingEnabled is false in BF so we can raycast from anywhere.
-		local params = RaycastParams.new()
-		params.FilterType = Enum.RaycastFilterType.Exclude
-		params.FilterDescendantsInstances = { ch }
-		local rayOrigin = Vector3.new(island.pos.X, island.pos.Y + 30, island.pos.Z)
-		local result = workspace:Raycast(rayOrigin, Vector3.new(0, -800, 0), params)
+		-- Snapshot + pause the auto-loops so they don't fight the tween
+		local restoreAutoFarm = cfg.autoFarm
+		local restoreAutoSea1 = cfg.autoSea1
+		cfg.autoFarm = false
+		cfg.autoSea1 = false
 
-		local landingPos
-		if result then
-			landingPos = result.Position + Vector3.new(0, 4, 0)
-		else
-			-- Fallback: bbox top + small lift. Better than dropping into a hole.
-			landingPos = Vector3.new(island.pos.X, island.pos.Y + 4, island.pos.Z)
-		end
-
-		local dest = CFrame.new(landingPos)
+		-- Lift dest Y by 6 so we land on the dock not under the water
+		local dest = CFrame.new(island.pos + Vector3.new(0, 6, 0))
 		local dist = (dest.Position - hrp.Position).Magnitude
 		local duration = math.max(0.5, dist / TP_SPEED)
 
@@ -348,11 +334,13 @@ function Module.start(lib)
 			{ CFrame = dest }
 		)
 		activeTpTween:Play()
-		-- Clear the handle once the tween finishes so the next call doesn't
-		-- think there's something to cancel.
 		task.spawn(function()
 			if activeTpTween then activeTpTween.Completed:Wait() end
 			activeTpTween = nil
+			-- Small grace period so the player can land before farm resumes
+			task.wait(0.3)
+			cfg.autoFarm = restoreAutoFarm
+			cfg.autoSea1 = restoreAutoSea1
 		end)
 		return true
 	end
