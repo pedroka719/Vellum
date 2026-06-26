@@ -1224,38 +1224,1071 @@ function Module.start(lib)
 		end
 	end
 
-	-- ═══════════════════════════ EXPORT ═══════════════════════════
-	-- Stash the locals we'll need from pass 5b's UI builders (tabs + buttons).
-	-- 5b will pick up from here and wire tabs into ui.* widgets.
-	local Internal = {
-		cfg = cfg,
-		stats = stats,
-		R = R,
-		ui = ui,
-		gui = gui,
-		safe = safe,
-		jwait = jwait,
-		getMe = getMe,
-		fmt = fmt, fmtDur = fmtDur, perHour = perHour,
-		cardIncome = cardIncome,
-		cardRarity = cardRarity,
-		ownedCardPool = ownedCardPool,
-		canRebirth = canRebirth,
-		hopNow = hopNow,
-		setAllAuto = setAllAuto,
-		fireTradeRequest = fireTradeRequest,
-		resolveTradeTarget = resolveTradeTarget,
-		tpToPlayer = tpToPlayer,
-		tpToTargetByUsername = tpToTargetByUsername,
-		setupCrashRecover = setupCrashRecover,
-		setupTradeHandler = setupTradeHandler,
-		RARITY_WEIGHT = RARITY_WEIGHT,
-		LOADER_URL = LOADER_URL,
+	-- ═══════════════════════════ PERSISTENCE ═══════════════════════════
+	local CFG_DIR       = "Vellum_SoccerCard/configs"
+	local AUTOLOAD_FILE = "Vellum_SoccerCard/autoload.txt"
+
+	local function ensureDir()
+		if makefolder then
+			if not (isfolder and isfolder("Vellum_SoccerCard")) then pcall(makefolder, "Vellum_SoccerCard") end
+			if not (isfolder and isfolder(CFG_DIR)) then pcall(makefolder, CFG_DIR) end
+		end
+	end
+
+	local function listConfigs()
+		ensureDir()
+		if not listfiles then return {} end
+		local ok, files = pcall(listfiles, CFG_DIR)
+		if not ok or not files then return {} end
+		local out = {}
+		for _, f in ipairs(files) do
+			local name = tostring(f):match("([^/\\]+)%.json$")
+			if name then table.insert(out, name) end
+		end
+		table.sort(out)
+		return out
+	end
+
+	local function configPath(name) return CFG_DIR .. "/" .. name .. ".json" end
+
+	local function saveConfig(name)
+		ensureDir()
+		if not writefile then return false, "executor missing writefile" end
+		local snap = {}
+		for k, v in pairs(cfg) do
+			if type(v) == "table" then
+				snap[k] = {}
+				for kk, vv in pairs(v) do snap[k][kk] = vv end
+			else
+				snap[k] = v
+			end
+		end
+		local ok, err = pcall(function() writefile(configPath(name), HttpService:JSONEncode(snap)) end)
+		return ok, err
+	end
+
+	local function loadConfigInto(name)
+		if not isfile or not isfile(configPath(name)) then return false, "not found" end
+		local ok, data = pcall(function() return HttpService:JSONDecode(readfile(configPath(name))) end)
+		if not ok then return false, "decode failed" end
+		for k, v in pairs(data) do
+			if type(cfg[k]) == "table" and type(v) == "table" then
+				for kk, vv in pairs(v) do cfg[k][kk] = vv end
+			else
+				cfg[k] = v
+			end
+		end
+		return true
+	end
+
+	local function deleteConfigFile(name)
+		if delfile and isfile and isfile(configPath(name)) then pcall(delfile, configPath(name)) end
+	end
+
+	local function getAutoloadName()
+		if isfile and isfile(AUTOLOAD_FILE) then
+			local ok, txt = pcall(readfile, AUTOLOAD_FILE)
+			if ok and txt and txt ~= "" then return txt end
+		end
+		return nil
+	end
+
+	local function setAutoloadName(name)
+		if writefile then pcall(writefile, AUTOLOAD_FILE, name or "") end
+	end
+
+	-- ═══════════════════════════ PRESETS ═══════════════════════════
+	local PRESETS = {
+		Conservative = {
+			autoCollect = true, autoCollectInt = 2.0,
+			autoBuy = true, autoBuyInt = 5.0,
+			autoOpen = true, autoOpenInt = 2.0,
+			autoSell = true, autoSellInt = 8.0,
+			rebirthSafe = true, mutationKeep = 2, keepWithTrophy = true,
+			autoRebirth = false,
+			autoBuyPacks = { Bronze = true, Silver = true, Gold = true },
+			autoSellRarities = { Bronze = true, Silver = true },
+		},
+		Aggressive = {
+			autoCollect = true, autoCollectInt = 0.5,
+			autoBuy = true, autoBuyInt = 1.0,
+			autoOpen = true, autoOpenInt = 0.5,
+			autoSell = true, autoSellInt = 2.0,
+			rebirthSafe = true, mutationKeep = 3, keepWithTrophy = true,
+			autoRebirth = true,
+			autoBuyPacks = (function() local t = {} for n in pairs(PackConfig.Packs) do t[n] = true end return t end)(),
+			autoSellRarities = {
+				Bronze = true, Silver = true, Gold = true, Legendary = true, Mythic = true,
+				["Azure Zenith"] = true, ["Crimson Zenith"] = true, Divine = true, Primordial = true,
+			},
+		},
+		["Rebirth Push"] = {
+			autoCollect = true, autoCollectInt = 0.5,
+			autoBuy = true, autoBuyInt = 1.5,
+			autoOpen = true, autoOpenInt = 0.8,
+			autoSell = true, autoSellInt = 3.0,
+			rebirthSafe = true, mutationKeep = 1, keepWithTrophy = true,
+			autoRebirth = true,
+			autoBuyPacks = (function() local t = {} for n in pairs(PackConfig.Packs) do t[n] = true end return t end)(),
+			autoSellRarities = { Bronze = true, Silver = true, Gold = true },
+		},
 	}
-	_G.__VellumSoccer = Internal  -- exposed for 5b sub-pass to wire UI; removed in final cleanup
+	local function applyPreset(name)
+		local p = PRESETS[name]
+		if not p then return end
+		for k, v in pairs(p) do
+			if type(cfg[k]) == "table" and type(v) == "table" then
+				cfg[k] = {}
+				for kk, vv in pairs(v) do cfg[k][kk] = vv end
+			else
+				cfg[k] = v
+			end
+		end
+	end
+
+	-- ═══════════════════════════ PAGES ═══════════════════════════
+	-- Pages must exist before their tab buttons reference them.
+	local farm     = ui.newPage("farm")
+	local sell     = ui.newPage("sell")
+	local rebirth  = ui.newPage("rebirth")
+	local claims   = ui.newPage("claims")
+	local codes    = ui.newPage("codes")
+	local statsPg  = ui.newPage("stats")
+	local settings = ui.newPage("settings")
+
+	-- forward-declared so AUTOLOAD section can write to it once Settings tab builds it
+	local autoloadStatus
+
+	-- ═══════════════════════════ FARM TAB ═══════════════════════════
+	-- Hero AFK card — only colored element (intentionally draws the eye)
+	local afkCard = Instance.new("Frame", farm)
+	afkCard.Size = UDim2.new(1, -8, 0, 64)
+	Theme.bind(afkCard, "BackgroundColor3", "row"); afkCard.BorderSizePixel = 0
+	Instance.new("UICorner", afkCard).CornerRadius = UDim.new(0, 6)
+	local afkStroke = Instance.new("UIStroke", afkCard)
+	Theme.bind(afkStroke, "Color", "accent")
+	afkStroke.Thickness = 1; afkStroke.Transparency = 0.55
+
+	local afkBtn = Instance.new("TextButton", afkCard)
+	afkBtn.Size = UDim2.new(1, -16, 0, 36); afkBtn.Position = UDim2.fromOffset(8, 8)
+	Theme.bind(afkBtn, "BackgroundColor3", "elev"); afkBtn.AutoButtonColor = false
+	afkBtn.Font = Enum.Font.GothamBold; afkBtn.TextSize = 13
+	Theme.bind(afkBtn, "TextColor3", "textDim"); afkBtn.Text = "ONE-TAP AFK  ·  OFF"
+	Instance.new("UICorner", afkBtn).CornerRadius = UDim.new(0, 4)
+
+	local afkHint = Instance.new("TextLabel", afkCard)
+	afkHint.Size = UDim2.new(1, -16, 0, 14); afkHint.Position = UDim2.fromOffset(8, 46)
+	afkHint.BackgroundTransparency = 1
+	afkHint.Text = "collects · buys · opens · sells (rebirth-safe) · rebirths · claims"
+	afkHint.Font = Enum.Font.Gotham; afkHint.TextSize = 10
+	Theme.bind(afkHint, "TextColor3", "textDim"); afkHint.TextXAlignment = Enum.TextXAlignment.Left
+
+	local function paintAfk()
+		if cfg.afkMode then
+			afkBtn.BackgroundColor3 = Theme.token("accent")
+			afkBtn.TextColor3 = Theme.token("accentText")
+			afkBtn.Text = "ONE-TAP AFK  ·  ON"
+			afkStroke.Transparency = 0.2
+		else
+			afkBtn.BackgroundColor3 = Theme.token("elev")
+			afkBtn.TextColor3 = Theme.token("textDim")
+			afkBtn.Text = "ONE-TAP AFK  ·  OFF"
+			afkStroke.Transparency = 0.55
+		end
+	end
+	afkBtn.MouseButton1Click:Connect(function()
+		cfg.afkMode = not cfg.afkMode
+		setAllAuto(cfg.afkMode)
+		paintAfk()
+	end)
+	Theme.bindCall(paintAfk)  -- repaint on theme swap
+	paintAfk()
+
+	ui.sectionLabel(farm, "AUTO COLLECT").Parent = farm
+	ui.toggleRow(farm, "Auto-collect plot slots",
+		function() return cfg.autoCollect end,
+		function(v) cfg.autoCollect = v end)
+	ui.intervalRow(farm, "Sweep interval",
+		function() return cfg.autoCollectInt end,
+		function(v) cfg.autoCollectInt = v end,
+		{ 0.5, 1.0, 2.0, 5.0 })
+
+	ui.sectionLabel(farm, "AUTO BUY PACKS").Parent = farm
+	ui.toggleRow(farm, "Auto-buy packs",
+		function() return cfg.autoBuy end,
+		function(v) cfg.autoBuy = v end)
+	ui.intervalRow(farm, "Buy interval",
+		function() return cfg.autoBuyInt end,
+		function(v) cfg.autoBuyInt = v end,
+		{ 1.0, 2.0, 5.0, 10.0 })
+
+	-- buy-top-N cycle row: 3 / 5 / 7 / all (0)
+	do
+		local r = ui.row(farm, 30)
+		local l = Instance.new("TextLabel", r)
+		l.Size = UDim2.new(1, -80, 1, 0); l.Position = UDim2.fromOffset(12, 0)
+		l.BackgroundTransparency = 1; l.Text = "Only buy top N packs"
+		l.Font = Enum.Font.Gotham; l.TextSize = 12
+		Theme.bind(l, "TextColor3", "text"); l.TextXAlignment = Enum.TextXAlignment.Left
+		local b = Instance.new("TextButton", r)
+		b.Size = UDim2.fromOffset(64, 20); b.Position = UDim2.new(1, -74, 0.5, -10)
+		Theme.bind(b, "BackgroundColor3", "elev"); b.AutoButtonColor = false
+		b.Font = Enum.Font.RobotoMono; b.TextSize = 11
+		Theme.bind(b, "TextColor3", "text")
+		Instance.new("UICorner", b).CornerRadius = UDim.new(0, 4)
+		local opts = { 3, 5, 7, 0 }
+		local function paint() b.Text = cfg.buyTopN == 0 and "all" or ("top " .. cfg.buyTopN) end
+		b.MouseButton1Click:Connect(function()
+			local idx = 1
+			for i, v in ipairs(opts) do if v == cfg.buyTopN then idx = i; break end end
+			idx = (idx % #opts) + 1
+			cfg.buyTopN = opts[idx]
+			paint()
+		end)
+		paint()
+	end
+
+	for _, pn in ipairs({
+		"Bronze","Silver","Gold","Diamond","Platinum","Toxic","Shadow",
+		"Infernal","Corrupted","Cosmic","Eclipse",
+	}) do
+		if PackConfig.Packs[pn] then
+			ui.multiToggleRow(farm,
+				"  " .. pn .. "  ($" .. fmt(PackConfig.Packs[pn].Price or 0) .. ")",
+				cfg.autoBuyPacks, pn)
+		end
+	end
+
+	ui.sectionLabel(farm, "AUTO OPEN PACKS").Parent = farm
+	ui.toggleRow(farm, "Auto-open pending packs",
+		function() return cfg.autoOpen end,
+		function(v) cfg.autoOpen = v end)
+	ui.intervalRow(farm, "Open interval",
+		function() return cfg.autoOpenInt end,
+		function(v) cfg.autoOpenInt = v end,
+		{ 0.5, 1.0, 2.0, 5.0 })
+
+	ui.sectionLabel(farm, "AUTO PLACE BEST").Parent = farm
+	ui.toggleRow(farm, "Auto-equip best cards in slots",
+		function() return cfg.autoEquipBest end,
+		function(v) cfg.autoEquipBest = v end)
+	ui.intervalRow(farm, "Equip check interval",
+		function() return cfg.autoEquipInt end,
+		function(v) cfg.autoEquipInt = v end,
+		{ 5.0, 8.0, 15.0, 30.0 })
+
+	ui.sectionLabel(farm, "ANTI-AFK").Parent = farm
+	ui.toggleRow(farm, "Bypass 20-min AFK kick",
+		function() return cfg.antiAfk end,
+		function(v) cfg.antiAfk = v end)
+
+	-- ═══════════════════════════ SELL TAB ═══════════════════════════
+	ui.sectionLabel(sell, "AUTO SELL").Parent = sell
+	ui.toggleRow(sell, "Auto-sell cards",
+		function() return cfg.autoSell end,
+		function(v) cfg.autoSell = v end)
+	ui.intervalRow(sell, "Sell interval",
+		function() return cfg.autoSellInt end,
+		function(v) cfg.autoSellInt = v end,
+		{ 2.0, 5.0, 10.0, 30.0 })
+	ui.toggleRow(sell, "Rebirth-safe (protect required cards)",
+		function() return cfg.rebirthSafe end,
+		function(v) cfg.rebirthSafe = v end)
+
+	local ALL_RARITIES = {
+		"Bronze","Silver","Gold","Legendary","Mythic",
+		"Azure Zenith","Crimson Zenith","Divine","Primordial","Oblivion",
+		"Eternity","Astral","Sovereign","Vandal","Verdant","Lunar","Nether",
+	}
+	ui.sectionLabel(sell, "RARITIES TO SELL").Parent = sell
+	for _, r in ipairs(ALL_RARITIES) do
+		ui.multiToggleRow(sell, "  " .. r, cfg.autoSellRarities, r)
+	end
+
+	ui.sectionLabel(sell, "ACTIONS").Parent = sell
+	ui.actionBtn(sell, "Sell Now (respect picks above)", function()
+		local uuids = pickSellable(cfg.autoSellRarities, cfg.rebirthSafe)
+		if #uuids > 0 then
+			R.SellCards:FireServer(uuids)
+			stats.sessionSells = stats.sessionSells + #uuids
+		end
+	end)
+	ui.actionBtn(sell, "Lock all rebirth-required cards", function()
+		local me = getMe(); if not me or not me.inventory then return end
+		local exact, rarities = buildRebirthReservation()
+		local exactLeft, rarityLeft = {}, {}
+		for k, v in pairs(exact) do exactLeft[k] = v end
+		for k, v in pairs(rarities) do rarityLeft[k] = v end
+		local sorted = {}
+		for _, c in ipairs(me.inventory) do table.insert(sorted, c) end
+		table.sort(sorted, function(a, b) return cardIncome(a) < cardIncome(b) end)
+		for _, c in ipairs(sorted) do
+			local locked = false
+			if exactLeft[c.id] and exactLeft[c.id] > 0 then
+				exactLeft[c.id] = exactLeft[c.id] - 1; locked = true
+			else
+				local r = cardRarity(c)
+				if rarityLeft[r] and rarityLeft[r] > 0 then
+					rarityLeft[r] = rarityLeft[r] - 1; locked = true
+				end
+			end
+			if locked and not c.locked then
+				pcall(function() R.LockCard:FireServer(c.uuid) end)
+			end
+		end
+	end)
+	ui.actionBtn(sell, "Sync server auto-sell with picks", function()
+		for _, r in ipairs(ALL_RARITIES) do
+			pcall(function() R.UpdateAutoSell:FireServer(r, cfg.autoSellRarities[r] == true) end)
+		end
+	end)
+
+	-- ═══════════════════════════ REBIRTH TAB ═══════════════════════════
+	local rebirthInfo = Instance.new("TextLabel", rebirth)
+	rebirthInfo.Size = UDim2.new(1, -8, 0, 200)
+	Theme.bind(rebirthInfo, "BackgroundColor3", "row")
+	rebirthInfo.BorderSizePixel = 0; rebirthInfo.Font = Enum.Font.Code; rebirthInfo.TextSize = 12
+	Theme.bind(rebirthInfo, "TextColor3", "text"); rebirthInfo.Text = "..."
+	rebirthInfo.TextXAlignment = Enum.TextXAlignment.Left
+	rebirthInfo.TextYAlignment = Enum.TextYAlignment.Top
+	rebirthInfo.TextWrapped = true
+	Instance.new("UICorner", rebirthInfo).CornerRadius = UDim.new(0, 6)
+	do
+		local pad = Instance.new("UIPadding", rebirthInfo)
+		pad.PaddingLeft = UDim.new(0, 10); pad.PaddingTop = UDim.new(0, 8); pad.PaddingRight = UDim.new(0, 10)
+	end
+
+	ui.toggleRow(rebirth, "Auto-rebirth when ready",
+		function() return cfg.autoRebirth end,
+		function(v) cfg.autoRebirth = v end)
+	ui.actionBtn(rebirth, "Rebirth Now", function()
+		local ok, why = canRebirth()
+		if ok then
+			R.Rebirth:FireServer()
+			stats.sessionRebirths = stats.sessionRebirths + 1
+			toast({ title = "Rebirth fired", body = "Server ack pending.", kind = "success" })
+		else
+			warn("[Vellum] cannot rebirth: " .. tostring(why))
+			toast({ title = "Can't rebirth", body = tostring(why), kind = "warn", duration = 7 })
+		end
+	end)
+	ui.actionBtn(rebirth, "Force rebirth (skip checks)", function()
+		pcall(function() R.Rebirth:FireServer() end)
+		toast({ title = "Force-rebirth fired", body = "Server may reject if not ready.", kind = "warn" })
+	end)
+
+	local function refreshRebirthInfo()
+		local me = getMe()
+		if not me then rebirthInfo.Text = "loading..."; return end
+		local cur = me.rebirth or 0
+		local tier = RebirthConfig.GetRebirth(cur + 1)
+		if not tier then rebirthInfo.Text = string.format("Max rebirth reached (%d).", cur); return end
+
+		local exactLeft, rarityLeft = {}, {}
+		for _, req in ipairs(tier.RequiredCards or {}) do
+			if req:sub(1, 4) == "any:" then
+				rarityLeft[req:sub(5)] = (rarityLeft[req:sub(5)] or 0) + 1
+			else
+				exactLeft[req] = (exactLeft[req] or 0) + 1
+			end
+		end
+		for _, c in ipairs(ownedCardPool(me)) do
+			if exactLeft[c.id] and exactLeft[c.id] > 0 then
+				exactLeft[c.id] = exactLeft[c.id] - 1
+			else
+				local r = cardRarity(c)
+				if rarityLeft[r] and rarityLeft[r] > 0 then
+					rarityLeft[r] = rarityLeft[r] - 1
+				end
+			end
+		end
+
+		local lines = { string.format("Current: R%d  →  Next: R%d", cur, cur + 1) }
+		local cashOk = (me.cash or 0) >= (tier.CashRequired or 0)
+		table.insert(lines, string.format("%s Cash:  $%s / $%s",
+			cashOk and "✓" or "✗", fmt(me.cash or 0), fmt(tier.CashRequired or 0)))
+		if tier.GemsRequired then
+			local gemsOk = (me.gems or 0) >= tier.GemsRequired
+			table.insert(lines, string.format("%s Gems:  %d / %d",
+				gemsOk and "✓" or "✗", me.gems or 0, tier.GemsRequired))
+		end
+		table.insert(lines, "")
+		local need = {}
+		for _, req in ipairs(tier.RequiredCards or {}) do table.insert(need, req) end
+		local seen = {}
+		for _, req in ipairs(need) do
+			if req:sub(1, 4) == "any:" then
+				local r = req:sub(5)
+				local key = "any:" .. r
+				seen[key] = (seen[key] or 0) + 1
+				local stillNeed = rarityLeft[r] or 0
+				if seen[key] == 1 then
+					local totalReq = 0
+					for _, r2 in ipairs(need) do if r2 == req then totalReq = totalReq + 1 end end
+					local have = totalReq - stillNeed
+					table.insert(lines, string.format("%s %d× any %s  (have %d)",
+						stillNeed == 0 and "✓" or "✗", totalReq, r, have))
+				end
+			else
+				local have = (exactLeft[req] or 0) == 0
+				table.insert(lines, string.format("%s %s", have and "✓" or "✗", req))
+			end
+		end
+		local ok = canRebirth()
+		table.insert(lines, "")
+		table.insert(lines, ok and "★ READY TO REBIRTH ★" or "(waiting for missing items)")
+		rebirthInfo.Text = table.concat(lines, "\n")
+	end
+
+	-- ═══════════════════════════ CLAIMS TAB ═══════════════════════════
+	ui.sectionLabel(claims, "AUTO CLAIMS (every 30s)").Parent = claims
+	ui.toggleRow(claims, "Daily Reward",
+		function() return cfg.autoDaily end, function(v) cfg.autoDaily = v end)
+	ui.toggleRow(claims, "Offline Reward",
+		function() return cfg.autoOffline end, function(v) cfg.autoOffline = v end)
+	ui.toggleRow(claims, "Leave Reward",
+		function() return cfg.autoLeave end, function(v) cfg.autoLeave = v end)
+	ui.toggleRow(claims, "Spin Wheel (free)",
+		function() return cfg.autoSpin end, function(v) cfg.autoSpin = v end)
+	ui.toggleRow(claims, "Throne Attempt",
+		function() return cfg.autoThrone end, function(v) cfg.autoThrone = v end)
+	ui.sectionLabel(claims, "ONE-SHOT CLAIMS").Parent = claims
+	ui.actionBtn(claims, "Claim Daily Now",   function() pcall(function() R.DailyReward:FireServer()   end) end)
+	ui.actionBtn(claims, "Claim Offline Now", function() pcall(function() R.OfflineReward:FireServer() end) end)
+	ui.actionBtn(claims, "Claim Leave Reward Now", function() pcall(function() R.LeaveReward:FireServer() end) end)
+	ui.actionBtn(claims, "Spin Wheel Now", function()
+		pcall(function()
+			local data = R.SpinWheelData:InvokeServer()
+			if data and data.canClaimFree then
+				R.SpinWheel:FireServer("claim_free")
+			elseif data and (data.spins or 0) > 0 then
+				R.SpinWheel:FireServer("spin")
+			end
+		end)
+	end)
+	ui.actionBtn(claims, "Attempt Throne Now", function() pcall(function() R.AttemptThrone:FireServer() end) end)
+
+	-- ═══════════════════════════ CODES TAB ═══════════════════════════
+	ui.sectionLabel(codes, "REDEEM CODES (one per line or comma-separated)").Parent = codes
+	local codeBox = Instance.new("TextBox", codes)
+	codeBox.Size = UDim2.new(1, -8, 0, 120)
+	Theme.bind(codeBox, "BackgroundColor3", "row")
+	codeBox.BorderSizePixel = 0; codeBox.Font = Enum.Font.Code; codeBox.TextSize = 12
+	Theme.bind(codeBox, "TextColor3", "text"); codeBox.PlaceholderText = "HAPPY, LUCKYGOAL, GOLDEN-STRIKE..."
+	codeBox.Text = ""; codeBox.MultiLine = true; codeBox.ClearTextOnFocus = false
+	codeBox.TextXAlignment = Enum.TextXAlignment.Left
+	codeBox.TextYAlignment = Enum.TextYAlignment.Top
+	Instance.new("UICorner", codeBox).CornerRadius = UDim.new(0, 6)
+	do
+		local pad = Instance.new("UIPadding", codeBox)
+		pad.PaddingLeft = UDim.new(0, 8); pad.PaddingTop = UDim.new(0, 6)
+	end
+	local codeStatus = Instance.new("TextLabel", codes)
+	codeStatus.Size = UDim2.new(1, -8, 0, 20); codeStatus.BackgroundTransparency = 1
+	codeStatus.Text = ""; codeStatus.Font = Enum.Font.Gotham; codeStatus.TextSize = 11
+	Theme.bind(codeStatus, "TextColor3", "textDim"); codeStatus.TextXAlignment = Enum.TextXAlignment.Left
+	ui.actionBtn(codes, "Redeem All", function()
+		local raw = codeBox.Text
+		local found = 0
+		for code in raw:gmatch("[%w%-_]+") do
+			if #code >= 3 then
+				pcall(function() R.RedeemCode:FireServer(code) end)
+				found = found + 1
+				task.wait(0.3)
+			end
+		end
+		codeStatus.Text = "Fired " .. found .. " code(s)"
+	end)
+
+	-- ═══════════════════════════ STATS TAB ═══════════════════════════
+	local statsLbl = Instance.new("TextLabel", statsPg)
+	statsLbl.Size = UDim2.new(1, -8, 0, 480)
+	Theme.bind(statsLbl, "BackgroundColor3", "row")
+	statsLbl.BorderSizePixel = 0; statsLbl.Font = Enum.Font.Code; statsLbl.TextSize = 12
+	Theme.bind(statsLbl, "TextColor3", "text"); statsLbl.Text = "loading..."
+	statsLbl.TextXAlignment = Enum.TextXAlignment.Left
+	statsLbl.TextYAlignment = Enum.TextYAlignment.Top
+	statsLbl.TextWrapped = false
+	Instance.new("UICorner", statsLbl).CornerRadius = UDim.new(0, 6)
+	do
+		local pad = Instance.new("UIPadding", statsLbl)
+		pad.PaddingLeft = UDim.new(0, 10); pad.PaddingTop = UDim.new(0, 8); pad.PaddingRight = UDim.new(0, 10)
+	end
+
+	local function rebirthEtaText(me, cashPerHour)
+		if not me then return "—" end
+		local nextTier = RebirthConfig.GetRebirth((me.rebirth or 0) + 1)
+		if not nextTier then return "max rebirth" end
+		local cost = nextTier.Cost or 0
+		if cost == 0 then return "—" end
+		local need = cost - (me.cash or 0)
+		if need <= 0 then return "ready now ✓" end
+		if cashPerHour <= 0 then return "—" end
+		return fmtDur(need / cashPerHour * 3600) .. " (need $" .. fmt(need) .. ")"
+	end
+
+	local function inventoryValue(me)
+		if not me or not me.inventory then return 0 end
+		local total = 0
+		for _, c in ipairs(me.inventory) do total = total + (cardIncome(c) or 0) end
+		return total
+	end
+
+	local function refreshStats()
+		local me = getMe()
+		if not me then statsLbl.Text = "Waiting for sync..."; return end
+		local elapsed = os.clock() - (stats.sessionStart or os.clock())
+		local cashPerHrNum = elapsed >= 60 and (stats.sessionCash * 3600 / elapsed) or 0
+
+		local rarityCount = {}
+		for _, c in ipairs(me.inventory or {}) do
+			local r = cardRarity(c)
+			rarityCount[r] = (rarityCount[r] or 0) + 1
+		end
+		local rarityByWeight = {}
+		for r, n in pairs(rarityCount) do
+			table.insert(rarityByWeight, { r = r, n = n, w = RARITY_WEIGHT[r] or 0 })
+		end
+		table.sort(rarityByWeight, function(a, b) return a.w > b.w end)
+		local rarityLines = {}
+		for _, x in ipairs(rarityByWeight) do
+			table.insert(rarityLines, string.format("  %-18s %d", x.r, x.n))
+		end
+
+		statsLbl.Text = string.format([[
+SESSION  (uptime %s)
+  Cash collected:  $%s   (%s/hr)
+  Cards sold:      %d    (%s/hr)
+  Packs opened:    %d    (%s/hr)
+  Rebirths:        %d
+  Server hops:     %d
+  Tournaments:     %d
+  Trades:          %d
+  Best rarity:     %s
+  Best mutation:   %dx
+
+PLAYER
+  Cash:            $%s
+  Gems:            %d
+  Rebirth:         R%d
+  Inventory:       %d cards  (≈$%s/sec)
+  Next rebirth in: %s
+
+INVENTORY BY RARITY
+%s]],
+			fmtDur(elapsed),
+			fmt(stats.sessionCash),  perHour(stats.sessionCash, elapsed),
+			stats.sessionSells,      perHour(stats.sessionSells, elapsed),
+			stats.sessionPacks,      perHour(stats.sessionPacks, elapsed),
+			stats.sessionRebirths,
+			stats.serverHops,
+			stats.tournamentsJoined,
+			stats.tradesCompleted,
+			tostring(stats.bestRarity or "—"),
+			stats.bestMutationCount or 0,
+			fmt(me.cash or 0), me.gems or 0, me.rebirth or 0,
+			#(me.inventory or {}), fmt(math.floor(inventoryValue(me))),
+			rebirthEtaText(me, cashPerHrNum),
+			table.concat(rarityLines, "\n")
+		)
+	end
+
+	-- ═══════════════════════════ SETTINGS TAB ═══════════════════════════
+	ui.sectionLabel(settings, "PRESETS").Parent = settings
+	for _, presetName in ipairs({ "Conservative", "Aggressive", "Rebirth Push" }) do
+		ui.actionBtn(settings, "Apply: " .. presetName, function()
+			applyPreset(presetName)
+			if autoloadStatus then autoloadStatus.Text = "Applied preset: " .. presetName end
+		end)
+	end
+
+	-- mutation/trophy keeper
+	ui.sectionLabel(settings, "MUTATION / TROPHY KEEPER").Parent = settings
+	do
+		local r = ui.row(settings, 30)
+		local l = Instance.new("TextLabel", r)
+		l.Size = UDim2.new(1, -70, 1, 0); l.Position = UDim2.fromOffset(12, 0)
+		l.BackgroundTransparency = 1; l.Font = Enum.Font.Gotham; l.TextSize = 12
+		Theme.bind(l, "TextColor3", "text"); l.TextXAlignment = Enum.TextXAlignment.Left
+		l.Text = "Min mutations to keep (tap to cycle)"
+		local b = Instance.new("TextButton", r)
+		b.Size = UDim2.fromOffset(54, 20); b.Position = UDim2.new(1, -64, 0.5, -10)
+		Theme.bind(b, "BackgroundColor3", "elev"); b.AutoButtonColor = false
+		b.Font = Enum.Font.RobotoMono; b.TextSize = 11
+		Theme.bind(b, "TextColor3", "text")
+		Instance.new("UICorner", b).CornerRadius = UDim.new(0, 4)
+		local function paint() b.Text = cfg.mutationKeep == 0 and "off" or (cfg.mutationKeep .. "+") end
+		b.MouseButton1Click:Connect(function()
+			cfg.mutationKeep = (cfg.mutationKeep + 1) % 5
+			paint()
+		end)
+		paint()
+	end
+	ui.toggleRow(settings, "Never sell card with trophy",
+		function() return cfg.keepWithTrophy end,
+		function(v) cfg.keepWithTrophy = v end)
+
+	-- discord webhook
+	ui.sectionLabel(settings, "DISCORD WEBHOOK").Parent = settings
+	do
+		local whRow = Instance.new("Frame", settings)
+		whRow.Size = UDim2.new(1, -8, 0, 30); whRow.BackgroundTransparency = 1
+		local whBox = Instance.new("TextBox", whRow)
+		whBox.Size = UDim2.new(1, -100, 1, 0)
+		Theme.bind(whBox, "BackgroundColor3", "row")
+		whBox.BorderSizePixel = 0; whBox.Font = Enum.Font.Code; whBox.TextSize = 11
+		Theme.bind(whBox, "TextColor3", "text")
+		whBox.PlaceholderText = "https://discord.com/api/webhooks/..."
+		whBox.Text = cfg.webhookUrl or ""; whBox.ClearTextOnFocus = false
+		whBox.TextXAlignment = Enum.TextXAlignment.Left
+		Instance.new("UICorner", whBox).CornerRadius = UDim.new(0, 6)
+		local pad = Instance.new("UIPadding", whBox); pad.PaddingLeft = UDim.new(0, 10)
+		local whSave = Instance.new("TextButton", whRow)
+		whSave.Size = UDim2.fromOffset(94, 30); whSave.Position = UDim2.new(1, -94, 0, 0)
+		Theme.bind(whSave, "BackgroundColor3", "accent"); whSave.AutoButtonColor = false
+		whSave.Font = Enum.Font.GothamBold; whSave.TextSize = 12
+		Theme.bind(whSave, "TextColor3", "accentText"); whSave.Text = "SET"
+		Instance.new("UICorner", whSave).CornerRadius = UDim.new(0, 6)
+		whSave.MouseButton1Click:Connect(function()
+			cfg.webhookUrl = whBox.Text or ""
+			postWebhook("✅ Webhook configured for Vellum")
+		end)
+	end
+	ui.actionBtn(settings, "Send test webhook ping", function()
+		postWebhook("🧪 Test ping from Vellum")
+	end)
+
+	-- exploits / advantage
+	ui.sectionLabel(settings, "EXPLOITS / ADVANTAGE").Parent = settings
+	ui.toggleRow(settings, "Pity Sniper (override priority near pity)",
+		function() return cfg.pitySniper end,
+		function(v) cfg.pitySniper = v end)
+	do
+		local r = ui.row(settings, 30)
+		local l = Instance.new("TextLabel", r)
+		l.Size = UDim2.new(1, -70, 1, 0); l.Position = UDim2.fromOffset(12, 0)
+		l.BackgroundTransparency = 1; l.Text = "Snipe when buys-to-pity ≤"
+		l.Font = Enum.Font.Gotham; l.TextSize = 12
+		Theme.bind(l, "TextColor3", "text"); l.TextXAlignment = Enum.TextXAlignment.Left
+		local b = Instance.new("TextButton", r)
+		b.Size = UDim2.fromOffset(54, 20); b.Position = UDim2.new(1, -64, 0.5, -10)
+		Theme.bind(b, "BackgroundColor3", "elev"); b.AutoButtonColor = false
+		b.Font = Enum.Font.RobotoMono; b.TextSize = 11
+		Theme.bind(b, "TextColor3", "text")
+		Instance.new("UICorner", b).CornerRadius = UDim.new(0, 4)
+		local opts = { 1, 2, 3, 5 }
+		local function paint() b.Text = tostring(cfg.pitySnipeWithin) end
+		b.MouseButton1Click:Connect(function()
+			local idx = 1
+			for i, v in ipairs(opts) do if v == cfg.pitySnipeWithin then idx = i; break end end
+			idx = (idx % #opts) + 1
+			cfg.pitySnipeWithin = opts[idx]
+			paint()
+		end)
+		paint()
+	end
+	ui.toggleRow(settings, "Sort packs by EV (math-optimal)",
+		function() return cfg.evSort end,
+		function(v) cfg.evSort = v end)
+	ui.actionBtn(settings, "Live: show pity status", function()
+		local me = getMe()
+		if not me then
+			if autoloadStatus then autoloadStatus.Text = "no state" end
+			return
+		end
+		local lines = {}
+		for name, def in pairs(PackConfig.Packs) do
+			if def.Pity and def.Pity.every then
+				local remaining = pityBuysRemaining(name, def)
+				if remaining ~= math.huge and remaining <= 50 then
+					table.insert(lines, string.format("%s: %d to pity → %s", name, remaining, def.Pity.rarity))
+				end
+			end
+		end
+		table.sort(lines)
+		if autoloadStatus then
+			autoloadStatus.Text = #lines > 0 and table.concat(lines, " · "):sub(1, 200) or "no nearby pity hits"
+		end
+	end)
+
+	-- stability
+	ui.sectionLabel(settings, "STABILITY").Parent = settings
+	ui.toggleRow(settings, "Conservative network mode (recommended)",
+		function() return cfg.conservativeMode end,
+		function(v) cfg.conservativeMode = v end)
+	do
+		local note = Instance.new("TextLabel", settings)
+		note.Size = UDim2.new(1, -8, 0, 30); note.BackgroundTransparency = 1
+		note.Text = "2.5× longer intervals + heavier jitter. Drops RPC rate ~75% to prevent Roblox LEASE_3506 crashes. Farm efficiency barely changes (server is the bottleneck)."
+		note.Font = Enum.Font.Gotham; note.TextSize = 10
+		Theme.bind(note, "TextColor3", "textDim"); note.TextXAlignment = Enum.TextXAlignment.Left
+		note.TextWrapped = true
+		local pad = Instance.new("UIPadding", note); pad.PaddingLeft = UDim.new(0, 10)
+	end
+
+	-- appearance — theme picker
+	ui.sectionLabel(settings, "APPEARANCE").Parent = settings
+	do
+		local order = Theme.presetNames()
+		local descriptions = {
+			Vellum    = "warm cream on deep ink",
+			Midnight  = "ice blue on navy",
+			Ink       = "pure black + white",
+			Parchment = "warm light, literary",
+			Matte     = "greyscale neutral",
+		}
+		local picker = Instance.new("Frame", settings)
+		picker.Size = UDim2.new(1, -8, 0, 56)
+		Theme.bind(picker, "BackgroundColor3", "row"); picker.BorderSizePixel = 0
+		Instance.new("UICorner", picker).CornerRadius = UDim.new(0, 4)
+		local swatchesRow = Instance.new("Frame", picker)
+		swatchesRow.Size = UDim2.new(1, -16, 0, 32); swatchesRow.Position = UDim2.fromOffset(8, 6)
+		swatchesRow.BackgroundTransparency = 1
+		local layout = Instance.new("UIListLayout", swatchesRow)
+		layout.FillDirection = Enum.FillDirection.Horizontal
+		layout.HorizontalAlignment = Enum.HorizontalAlignment.Left
+		layout.VerticalAlignment = Enum.VerticalAlignment.Center
+		layout.Padding = UDim.new(0, 6)
+
+		local descLabel = Instance.new("TextLabel", picker)
+		descLabel.Size = UDim2.new(1, -16, 0, 14); descLabel.Position = UDim2.fromOffset(8, 40)
+		descLabel.BackgroundTransparency = 1
+		descLabel.Font = Enum.Font.Gotham; descLabel.TextSize = 10
+		Theme.bind(descLabel, "TextColor3", "textDim")
+		descLabel.TextXAlignment = Enum.TextXAlignment.Left
+		descLabel.Text = (descriptions[cfg.themeName] or "")
+
+		local presetPreviews = Theme.presets()
+		local _swatches = {}
+		local function paintActive()
+			for name, sw in pairs(_swatches) do
+				sw.stroke.Transparency = (name == cfg.themeName) and 0 or 0.7
+				sw.stroke.Thickness = (name == cfg.themeName) and 1.5 or 1
+			end
+			descLabel.Text = (descriptions[cfg.themeName] or "")
+		end
+		for i, name in ipairs(order) do
+			local preset = presetPreviews[name]
+			local sw = Instance.new("TextButton", swatchesRow)
+			sw.Size = UDim2.fromOffset(72, 32); sw.LayoutOrder = i
+			sw.BackgroundColor3 = preset.panel; sw.AutoButtonColor = false
+			sw.Text = ""
+			Instance.new("UICorner", sw).CornerRadius = UDim.new(0, 4)
+			local s = Instance.new("UIStroke", sw)
+			s.Color = preset.accent; s.Thickness = 1; s.Transparency = 0.7
+
+			local dot = Instance.new("Frame", sw)
+			dot.Size = UDim2.fromOffset(8, 8); dot.AnchorPoint = Vector2.new(0, 0.5)
+			dot.Position = UDim2.new(0, 8, 0.5, 0)
+			dot.BackgroundColor3 = preset.accent; dot.BorderSizePixel = 0
+			Instance.new("UICorner", dot).CornerRadius = UDim.new(1, 0)
+
+			local lbl = Instance.new("TextLabel", sw)
+			lbl.Size = UDim2.new(1, -22, 1, 0); lbl.Position = UDim2.fromOffset(20, 0)
+			lbl.BackgroundTransparency = 1; lbl.Text = name
+			lbl.Font = Enum.Font.GothamMedium; lbl.TextSize = 10
+			lbl.TextColor3 = preset.text; lbl.TextXAlignment = Enum.TextXAlignment.Left
+
+			sw.MouseButton1Click:Connect(function()
+				cfg.themeName = name
+				Theme.apply(name)
+				paintActive()
+			end)
+			_swatches[name] = { btn = sw, stroke = s }
+		end
+		paintActive()
+	end
+
+	-- extras
+	ui.sectionLabel(settings, "EXTRAS").Parent = settings
+	ui.toggleRow(settings, "Jitter intervals (anti-pattern)",
+		function() return cfg.jitter end, function(v) cfg.jitter = v end)
+	ui.toggleRow(settings, "RightShift toggles UI",
+		function() return cfg.keybindToggle end, function(v) cfg.keybindToggle = v end)
+	ui.toggleRow(settings, "Auto-claim index gems",
+		function() return cfg.autoIndexGems end, function(v) cfg.autoIndexGems = v end)
+	ui.toggleRow(settings, "Auto-join tournament",
+		function() return cfg.autoTournament end, function(v) cfg.autoTournament = v end)
+	ui.toggleRow(settings, "In-game toast notifications",
+		function() return cfg.notifyInGame end, function(v) cfg.notifyInGame = v end)
+
+	-- afk survivability
+	ui.sectionLabel(settings, "AFK SURVIVABILITY").Parent = settings
+	ui.toggleRow(settings, "Low detail mode (less GPU, less crash)",
+		function() return cfg.lowDetail end, function(v) cfg.lowDetail = v end)
+	ui.toggleRow(settings, "Crash recovery (re-runs script on rejoin)",
+		function() return cfg.crashRecover end,
+		function(v) cfg.crashRecover = v; if v then setupCrashRecover() end end)
+
+	-- server hopping
+	ui.sectionLabel(settings, "SERVER HOPPING").Parent = settings
+	ui.toggleRow(settings, "Enable server hop features",
+		function() return cfg.serverHop end, function(v) cfg.serverHop = v end)
+	ui.toggleRow(settings, "  Auto-hop on bad ping (>" .. tostring(cfg.pingHopThreshold) .. "ms for 30s)",
+		function() return cfg.serverHopOnBadPing end, function(v) cfg.serverHopOnBadPing = v end)
+	ui.toggleRow(settings, "  Auto-hop on low FPS (<" .. tostring(cfg.fpsHopThreshold) .. " for 30s)",
+		function() return cfg.hopOnLowFps end, function(v) cfg.hopOnLowFps = v end)
+	ui.actionBtn(settings, "Hop to fresh server NOW", function() task.spawn(hopNow) end)
+
+	-- trading
+	ui.sectionLabel(settings, "TRADING").Parent = settings
+	do
+		local trgBox = Instance.new("TextBox", settings)
+		trgBox.Size = UDim2.new(1, -8, 0, 30)
+		Theme.bind(trgBox, "BackgroundColor3", "row")
+		trgBox.BorderSizePixel = 0; trgBox.Font = Enum.Font.Gotham; trgBox.TextSize = 12
+		Theme.bind(trgBox, "TextColor3", "text")
+		trgBox.PlaceholderText = "Target username (friend / alt)"
+		trgBox.Text = cfg.tradeTarget or ""; trgBox.ClearTextOnFocus = false
+		Instance.new("UICorner", trgBox).CornerRadius = UDim.new(0, 6)
+		local pad = Instance.new("UIPadding", trgBox); pad.PaddingLeft = UDim.new(0, 10)
+		trgBox.FocusLost:Connect(function()
+			cfg.tradeTarget = trgBox.Text
+			_tradeTargetCache.username, _tradeTargetCache.userId = nil, nil
+		end)
+	end
+	ui.toggleRow(settings, "Auto-accept trade from target",
+		function() return cfg.tradeAutoAcceptFromTarget end, function(v) cfg.tradeAutoAcceptFromTarget = v end)
+	ui.toggleRow(settings, "Auto-fill + auto-ready when trade opens",
+		function() return cfg.tradeAutoFillOnOpen end, function(v) cfg.tradeAutoFillOnOpen = v end)
+	ui.toggleRow(settings, "Auto-request trade from target (loop)",
+		function() return cfg.tradeAutoSendLoop end, function(v) cfg.tradeAutoSendLoop = v end)
+	ui.toggleRow(settings, "  TP next to target before request",
+		function() return cfg.tradeAutoTpBeforeRequest end, function(v) cfg.tradeAutoTpBeforeRequest = v end)
+	ui.actionBtn(settings, "TP to target", function()
+		task.spawn(function()
+			local ok, why = tpToTargetByUsername()
+			warn("[Vellum trade] TP result: " .. tostring(ok) .. " / " .. tostring(why))
+		end)
+	end)
+	ui.actionBtn(settings, "TP to target + send request", function()
+		task.spawn(function()
+			local id = resolveTradeTarget()
+			if not id then warn("[Vellum trade] target not resolvable") return end
+			local p = Players:GetPlayerByUserId(id)
+			if not p then warn("[Vellum trade] target not in server") return end
+			tpToPlayer(p)
+			task.wait(0.6)
+			if fireTradeRequest(id) then
+				warn("[Vellum trade] tp+request fired to " .. tostring(id))
+			end
+		end)
+	end)
+	ui.actionBtn(settings, "Send request only (no TP)", function()
+		task.spawn(function()
+			local id = resolveTradeTarget()
+			if not id then warn("[Vellum trade] target not resolvable") return end
+			if fireTradeRequest(id) then
+				warn("[Vellum trade] manual request fired to " .. tostring(id))
+			end
+		end)
+	end)
+
+	-- autoload status
+	ui.sectionLabel(settings, "AUTOLOAD").Parent = settings
+	autoloadStatus = Instance.new("TextLabel", settings)
+	autoloadStatus.Size = UDim2.new(1, -8, 0, 22)
+	Theme.bind(autoloadStatus, "BackgroundColor3", "row")
+	autoloadStatus.BorderSizePixel = 0; autoloadStatus.Font = Enum.Font.GothamSemibold; autoloadStatus.TextSize = 11
+	Theme.bind(autoloadStatus, "TextColor3", "text"); autoloadStatus.TextXAlignment = Enum.TextXAlignment.Left
+	autoloadStatus.Text = ""
+	Instance.new("UICorner", autoloadStatus).CornerRadius = UDim.new(0, 6)
+	do
+		local pad = Instance.new("UIPadding", autoloadStatus); pad.PaddingLeft = UDim.new(0, 10)
+	end
+
+	-- save-new
+	ui.sectionLabel(settings, "SAVE CURRENT CONFIG").Parent = settings
+	local saveBox
+	do
+		local r = Instance.new("Frame", settings)
+		r.Size = UDim2.new(1, -8, 0, 30); r.BackgroundTransparency = 1
+		saveBox = Instance.new("TextBox", r)
+		saveBox.Size = UDim2.new(1, -100, 1, 0)
+		Theme.bind(saveBox, "BackgroundColor3", "row")
+		saveBox.BorderSizePixel = 0; saveBox.Font = Enum.Font.Gotham; saveBox.TextSize = 12
+		Theme.bind(saveBox, "TextColor3", "text"); saveBox.PlaceholderText = "config name..."
+		saveBox.Text = ""; saveBox.ClearTextOnFocus = false
+		saveBox.TextXAlignment = Enum.TextXAlignment.Left
+		Instance.new("UICorner", saveBox).CornerRadius = UDim.new(0, 6)
+		local pad = Instance.new("UIPadding", saveBox); pad.PaddingLeft = UDim.new(0, 10)
+		local b = Instance.new("TextButton", r)
+		b.Size = UDim2.fromOffset(94, 30); b.Position = UDim2.new(1, -94, 0, 0)
+		Theme.bind(b, "BackgroundColor3", "accent"); b.AutoButtonColor = false
+		b.Font = Enum.Font.GothamBold; b.TextSize = 12
+		Theme.bind(b, "TextColor3", "accentText"); b.Text = "SAVE"
+		Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
+		b.MouseButton1Click:Connect(function()
+			local name = saveBox.Text:gsub("[^%w%-_ ]", ""):gsub("^%s+", ""):gsub("%s+$", "")
+			if name == "" then autoloadStatus.Text = "Name can't be empty"; return end
+			local ok, err = saveConfig(name)
+			autoloadStatus.Text = ok and ("Saved: " .. name) or ("Save failed: " .. tostring(err))
+			saveBox.Text = ""
+			refreshSettingsList()  -- forward-declared just below
+		end)
+	end
+
+	-- saved-configs list
+	ui.sectionLabel(settings, "SAVED CONFIGS").Parent = settings
+	local listHolder = Instance.new("Frame", settings)
+	listHolder.Size = UDim2.new(1, -8, 0, 0); listHolder.BackgroundTransparency = 1
+	listHolder.AutomaticSize = Enum.AutomaticSize.Y
+	local listLayout = Instance.new("UIListLayout", listHolder)
+	listLayout.Padding = UDim.new(0, 4); listLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
+	local refreshSettingsList  -- forward-declared above as local
+
+	local function configRow(name, isAutoload)
+		local r = ui.row(listHolder, 32)
+		local nameLbl = Instance.new("TextLabel", r)
+		nameLbl.Size = UDim2.new(1, -260, 1, 0); nameLbl.Position = UDim2.fromOffset(12, 0)
+		nameLbl.BackgroundTransparency = 1
+		nameLbl.Text = (isAutoload and "★ " or "") .. name
+		nameLbl.Font = Enum.Font.GothamMedium; nameLbl.TextSize = 12
+		nameLbl.TextColor3 = isAutoload and Theme.token("warn") or Theme.token("text")
+		nameLbl.TextXAlignment = Enum.TextXAlignment.Left
+
+		local function mkBtn(text, color, txtColor, xOffset, width)
+			local b = Instance.new("TextButton", r)
+			b.Size = UDim2.fromOffset(width or 48, 22)
+			b.Position = UDim2.new(1, xOffset, 0.5, -11)
+			b.BackgroundColor3 = color; b.TextColor3 = txtColor
+			b.AutoButtonColor = false; b.Font = Enum.Font.GothamBold; b.TextSize = 10
+			b.Text = text
+			Instance.new("UICorner", b).CornerRadius = UDim.new(0, 4)
+			return b
+		end
+
+		local loadBtn = mkBtn("LOAD", Theme.token("elev"),  Theme.token("text"),      -250, 48)
+		local sBtn    = mkBtn("SAVE", Theme.token("accent"), Theme.token("accentText"), -198, 48)
+		local autoBtn = mkBtn(isAutoload and "AUTO ★" or "AUTO",
+			isAutoload and Theme.token("warn") or Theme.token("elev"),
+			isAutoload and Theme.token("accentText") or Theme.token("textDim"),
+			-146, 60)
+		local delBtn  = mkBtn("✕", Theme.token("elev"), Theme.token("danger"),  -82, 28)
+
+		loadBtn.MouseButton1Click:Connect(function()
+			local ok, err = loadConfigInto(name)
+			autoloadStatus.Text = ok and ("Loaded: " .. name) or ("Load failed: " .. tostring(err))
+		end)
+		sBtn.MouseButton1Click:Connect(function()
+			local ok, err = saveConfig(name)
+			autoloadStatus.Text = ok and ("Overwrote: " .. name) or ("Save failed: " .. tostring(err))
+		end)
+		autoBtn.MouseButton1Click:Connect(function()
+			local current = getAutoloadName()
+			if current == name then setAutoloadName(nil)
+			else setAutoloadName(name) end
+			refreshSettingsList()
+		end)
+		delBtn.MouseButton1Click:Connect(function()
+			deleteConfigFile(name)
+			if getAutoloadName() == name then setAutoloadName(nil) end
+			refreshSettingsList()
+		end)
+	end
+
+	refreshSettingsList = function()
+		for _, c in ipairs(listHolder:GetChildren()) do
+			if c:IsA("Frame") then c:Destroy() end
+		end
+		local autoload = getAutoloadName()
+		autoloadStatus.Text = autoload and ("Will auto-load on script run: " .. autoload) or "No autoload set"
+		autoloadStatus.TextColor3 = autoload and Theme.token("warn") or Theme.token("textDim")
+		for _, name in ipairs(listConfigs()) do
+			configRow(name, name == autoload)
+		end
+	end
+	refreshSettingsList()
+
+	-- ═══════════════════════════ TABS (after all pages are populated) ═══════════════════════════
+	ui.newTab("farm",     "Farm",     1)
+	ui.newTab("sell",     "Sell",     2)
+	ui.newTab("rebirth",  "Rebirth",  3)
+	ui.newTab("claims",   "Claims",   4)
+	ui.newTab("codes",    "Codes",    5)
+	ui.newTab("stats",    "Stats",    6)
+	ui.newTab("settings", "Settings", 7)
+	ui.setActiveTab("farm")
+
+	-- ═══════════════════════════ MINIMIZE + KEYBIND ═══════════════════════════
+	local function makeFloatingIcon()
+		local icon = Instance.new("TextButton", ui.gui)
+		icon.Size = UDim2.fromOffset(50, 50); icon.Position = UDim2.fromOffset(20, 100)
+		Theme.bind(icon, "BackgroundColor3", "panel"); icon.AutoButtonColor = false
+		icon.Text = "V"; icon.Font = Enum.Font.Antique; icon.TextSize = 22
+		Theme.bind(icon, "TextColor3", "accent"); icon.Active = true; icon.Draggable = true
+		Instance.new("UICorner", icon).CornerRadius = UDim.new(1, 0)
+		local s = Instance.new("UIStroke", icon)
+		Theme.bind(s, "Color", "accent"); s.Thickness = 1.4; s.Transparency = 0.35
+
+		-- pulse the stroke when AFK is active so you can tell the script's alive
+		task.spawn(function()
+			while icon.Parent do
+				if cfg.afkMode then
+					local fade = TweenService:Create(s,
+						TweenInfo.new(0.9, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true),
+						{ Transparency = 0.75, Thickness = 2.4 })
+					fade:Play()
+					while icon.Parent and cfg.afkMode do task.wait(0.2) end
+					fade:Cancel()
+					s.Transparency = 0.3; s.Thickness = 1.6
+				else
+					task.wait(0.3)
+				end
+			end
+		end)
+
+		icon.MouseButton1Click:Connect(function()
+			ui.root.Visible = true
+			icon:Destroy()
+		end)
+		return icon
+	end
+
+	ui.minBtn.MouseButton1Click:Connect(function()
+		ui.root.Visible = false
+		makeFloatingIcon()
+	end)
+
+	-- RightShift toggles UI visibility
+	UserInputService.InputBegan:Connect(function(input, processed)
+		if processed or not cfg.keybindToggle then return end
+		if input.KeyCode == Enum.KeyCode.RightShift then
+			if ui.root.Visible then
+				ui.root.Visible = false
+				if not ui.gui:FindFirstChildOfClass("TextButton") then makeFloatingIcon() end
+			else
+				ui.root.Visible = true
+				for _, c in ipairs(ui.gui:GetChildren()) do
+					if c:IsA("TextButton") then c:Destroy() end
+				end
+			end
+		end
+	end)
+
+	-- ═══════════════════════════ AUTOLOAD ═══════════════════════════
+	do
+		local autoName = getAutoloadName()
+		if autoName then
+			local ok, err = loadConfigInto(autoName)
+			if ok then
+				print("[Vellum] Auto-loaded config:", autoName)
+				if cfg.afkMode then
+					setAllAuto(true)
+					paintAfk()
+				end
+			else
+				warn("[Vellum] Autoload failed: " .. tostring(err))
+			end
+		end
+	end
+
+	-- Apply the persisted theme after autoload (might have loaded a different one)
+	Theme.apply(cfg.themeName or "Vellum")
 
 	-- ═══════════════════════════ SPAWN LOOPS ═══════════════════════════
-	-- All loops guard with `gui.Parent` so closing the UI destroys them.
+	-- All loops guard with `gui.Parent` so closing the UI tears them down.
 	task.spawn(autoCollectLoop)
 	task.spawn(autoBuyLoop)
 	task.spawn(autoOpenLoop)
@@ -1274,12 +2307,16 @@ function Module.start(lib)
 	setupCrashRecover()
 	setupTradeHandler()
 
-	-- Apply the persisted theme before any UI mounts further widgets
-	Theme.apply(cfg.themeName or "Vellum")
+	-- ═══════════════════════════ LIVE REFRESH ═══════════════════════════
+	task.spawn(function()
+		while gui.Parent do
+			safe(refreshRebirthInfo)
+			safe(refreshStats)
+			task.wait(1)
+		end
+	end)
 
-	-- NOTE: tabs + AFK card + persistence UI + theme picker + floating icon
-	-- are populated in pass 5b. Until then the panel will be blank but the
-	-- background auto-loops are live.
+	print("[Vellum] Soccer module loaded.")
 end
 
 return Module
