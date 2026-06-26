@@ -194,21 +194,17 @@ function UI.mount(opts)
 	local function repaintTab(name, active)
 		local entry = tabs[name]
 		if not entry then return end
-		local btn = entry.btn
+		local btn, lbl = entry.btn, entry.lbl
 		if active then
 			btn.BackgroundTransparency = 0
 			btn.BackgroundColor3 = Theme.token("elev")
-			btn.TextColor3 = Theme.token("text")
-			if btn:FindFirstChild("AccentStrip") then
-				btn.AccentStrip.BackgroundColor3 = Theme.token("accent")
-				btn.AccentStrip.Visible = true
-			end
+			lbl.TextColor3 = Theme.token("text")
+			btn.AccentStrip.BackgroundColor3 = Theme.token("accent")
+			btn.AccentStrip.Visible = true
 		else
 			btn.BackgroundTransparency = 1
-			btn.TextColor3 = Theme.token("textDim")
-			if btn:FindFirstChild("AccentStrip") then
-				btn.AccentStrip.Visible = false
-			end
+			lbl.TextColor3 = Theme.token("textDim")
+			btn.AccentStrip.Visible = false
 		end
 	end
 
@@ -254,13 +250,15 @@ function UI.mount(opts)
 	end
 
 	function Builder.newTab(name, label, order)
+		-- Structure: TextButton frame (click target, empty intrinsic text)
+		--   ├── AccentStrip Frame at x=4 (active-only)
+		--   └── TextLabel  at x=14 (the label; clicks pass through to button)
+		-- Avoids the UIPadding-shifts-strip-onto-text bug: UIPadding offsets
+		-- every child by PaddingLeft, so a strip at x=4 lands at x=18 (over text).
 		local b = Instance.new("TextButton", sidebar)
 		b.Size = UDim2.new(1, 0, 0, 28); b.LayoutOrder = order or 0
 		b.BackgroundTransparency = 1; b.AutoButtonColor = false
-		b.Text = label; b.Font = Enum.Font.GothamMedium; b.TextSize = 11
-		b.TextColor3 = Theme.token("textDim")
-		b.TextXAlignment = Enum.TextXAlignment.Left
-		local btnPad = Instance.new("UIPadding", b); btnPad.PaddingLeft = UDim.new(0, 14)
+		b.Text = ""  -- label rendered by child TextLabel instead
 		Instance.new("UICorner", b).CornerRadius = UDim.new(0, 4)
 
 		local strip = Instance.new("Frame", b)
@@ -269,17 +267,25 @@ function UI.mount(opts)
 		strip.BackgroundColor3 = Theme.token("accent"); strip.BorderSizePixel = 0
 		strip.Visible = false
 
+		local lbl = Instance.new("TextLabel", b)
+		lbl.Name = "Label"
+		lbl.Size = UDim2.new(1, -18, 1, 0); lbl.Position = UDim2.fromOffset(14, 0)
+		lbl.BackgroundTransparency = 1
+		lbl.Text = label; lbl.Font = Enum.Font.GothamMedium; lbl.TextSize = 11
+		lbl.TextColor3 = Theme.token("textDim")
+		lbl.TextXAlignment = Enum.TextXAlignment.Left
+
 		b.MouseEnter:Connect(function()
 			if activeName == name then return end
-			b.TextColor3 = Theme.token("text")
+			lbl.TextColor3 = Theme.token("text")
 		end)
 		b.MouseLeave:Connect(function()
 			if activeName == name then return end
-			b.TextColor3 = Theme.token("textDim")
+			lbl.TextColor3 = Theme.token("textDim")
 		end)
 		b.MouseButton1Click:Connect(function() setActiveTab(name) end)
 
-		tabs[name] = { btn = b, page = pages[name] or error("newTab '"..name.."' before newPage", 2) }
+		tabs[name] = { btn = b, lbl = lbl, page = pages[name] or error("newTab '"..name.."' before newPage", 2) }
 		return b
 	end
 
