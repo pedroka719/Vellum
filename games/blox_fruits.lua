@@ -297,14 +297,19 @@ function Module.start(lib)
 
 	-- Tween-based island TP. Raw CFrame writes trigger BF's server rollback
 	-- to Data.LastSpawnPoint after a kick. Tweening through space at
-	-- <1000 studs/sec looks like fast travel, no rollback. Land directly
-	-- on the dock (sea-level Y + 6 lift).
+	-- <750 studs/sec keeps us under the StarterCharacter "Fling and
+	-- Underwater Glitching Fix" velocity throttle (verified live: setting
+	-- velocity to mag 800 gets zeroed within 100ms). 600 leaves margin.
+	--
+	-- Faster speeds cause the server-derived velocity to exceed 750,
+	-- the local fling fix clamps to mag 100, replication desyncs, and
+	-- the player lands somewhere along the path instead of at the dock.
 	--
 	-- Critical: we PAUSE autoFarm + autoSea1 during the tween, otherwise
 	-- the flight loop's Heartbeat:Lerp fights our CFrame writes every
 	-- frame and yanks the player toward the nearest enemy. After the
 	-- tween lands, we restore whatever was on before.
-	local TP_SPEED = 1000  -- studs/sec; under the 1500 velocity cap
+	local TP_SPEED = 600  -- studs/sec; under the 750 fling-fix throttle
 
 	local activeTpTween
 	local function tpToIsland(name)
