@@ -266,24 +266,30 @@ function Module.start(lib)
 	end
 
 	-- ═══════════════════════════ ISLAND MAP ═══════════════════════════
-	-- Sea 1 destinations. Coordinates are spawn-points pulled from the
-	-- recon pass (workspace._WorldOrigin.Locations). Y is the walkable
-	-- surface level — TPing here drops the player on solid ground.
+	-- Sea 1 destinations. Coordinates are the TOP CENTER of each island's
+	-- bounding box in workspace.Map/* — placing the player there guarantees
+	-- they're above all geometry, the raycast finds the walkable surface,
+	-- and we drop them safely on it.
+	--
+	-- The Locations folder (workspace._WorldOrigin.Locations) we used at
+	-- first holds detection-zone markers at sea level — useless as spawn
+	-- targets because the bbox of e.g. Fountain City peaks at Y=578 while
+	-- the Locations marker sits at Y=-13 (in the water).
 	local ISLANDS = {
-		{ name = "Pirate Starter",  pos = Vector3.new(1014, 17,  1462), lvlRange = "Lv 1-9"     },
-		{ name = "Marine Starter",  pos = Vector3.new(-2921, -10, 2111), lvlRange = "Lv 1-9"    },
-		{ name = "Middle Town",     pos = Vector3.new(-833, 6,   1628), lvlRange = "Lv 10-14"   },
-		{ name = "Jungle",          pos = Vector3.new(-1419, 8,  -76),  lvlRange = "Lv 15-29"   },
-		{ name = "Pirate Village",  pos = Vector3.new(-1133, 5,  4176), lvlRange = "Lv 30-59"   },
-		{ name = "Desert",          pos = Vector3.new(1193, 7,   4430), lvlRange = "Lv 60-89"   },
-		{ name = "Frozen Village",  pos = Vector3.new(1276, 5,  -1472), lvlRange = "Lv 90-119"  },
-		{ name = "Marine Fortress", pos = Vector3.new(-4935, 8,  4318), lvlRange = "Lv 120-149" },
-		{ name = "Skylands",        pos = Vector3.new(-4622, 845,-1817),lvlRange = "Lv 150-249" },
-		{ name = "Prison",          pos = Vector3.new(5277, 4,   743),  lvlRange = "Lv 250-324" },
-		{ name = "Colosseum",       pos = Vector3.new(-1685, 14, -3200),lvlRange = "PvP"        },
-		{ name = "Magma Village",   pos = Vector3.new(-5528, 5,  8691), lvlRange = "Lv 325-449" },
-		{ name = "Underwater City", pos = Vector3.new(61379, 5,  1473), lvlRange = "Lv 450-624" },
-		{ name = "Fountain City",   pos = Vector3.new(5717, 38,  4356), lvlRange = "Lv 625-749" },
+		{ name = "Pirate Starter",  pos = Vector3.new(1017, 91,  1440),  lvlRange = "Lv 1-9"     },
+		{ name = "Marine Starter",  pos = Vector3.new(-2920, 220, 2093), lvlRange = "Lv 1-9"     },
+		{ name = "Middle Town",     pos = Vector3.new(-832, 88,  1616),  lvlRange = "Lv 10-14"   },
+		{ name = "Jungle",          pos = Vector3.new(-1454, 144, -57),  lvlRange = "Lv 15-29"   },
+		{ name = "Pirate Village",  pos = Vector3.new(-1145, 123, 4138), lvlRange = "Lv 30-59"   },
+		{ name = "Desert",          pos = Vector3.new(1215, 90,  4344),  lvlRange = "Lv 60-89"   },
+		{ name = "Frozen Village",  pos = Vector3.new(1246, 136, -1432), lvlRange = "Lv 90-119"  },
+		{ name = "Marine Fortress", pos = Vector3.new(-4907, 355, 4285), lvlRange = "Lv 120-149" },
+		{ name = "Skylands",        pos = Vector3.new(-4658, 997, -1801),lvlRange = "Lv 150-249" },
+		{ name = "Prison",          pos = Vector3.new(5270, 167, 749),   lvlRange = "Lv 250-324" },
+		{ name = "Colosseum",       pos = Vector3.new(-1687, 141, -3184),lvlRange = "PvP"        },
+		{ name = "Magma Village",   pos = Vector3.new(-5555, 306, 8632), lvlRange = "Lv 325-449" },
+		{ name = "Underwater City", pos = Vector3.new(61399, 377, 1450), lvlRange = "Lv 450-624" },
+		{ name = "Fountain City",   pos = Vector3.new(5684, 578, 4402),  lvlRange = "Lv 625-749" },
 	}
 
 	local ISLAND_BY_NAME = {}
@@ -308,27 +314,36 @@ function Module.start(lib)
 		local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
 		if not hrp then return false end
 
-		local safeY = island.pos.Y + 80
+		-- 30 studs above bbox top is comfortable headroom for the raycast.
+		local safeY = island.pos.Y + 30
 		local aboveCF = CFrame.new(Vector3.new(island.pos.X, safeY, island.pos.Z))
 		hrp.CFrame = aboveCF
 		hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
 		hrp.Anchored = true
 
 		task.spawn(function()
+			-- Filter the player's character out so the raycast doesn't hit
+			-- our own HRP/limbs and report them as "ground".
+			local params = RaycastParams.new()
+			params.FilterType = Enum.RaycastFilterType.Exclude
+			params.FilterDescendantsInstances = { ch }
+			params.IgnoreWater = false  -- water counts as ground for underwater islands
+
 			local t0 = os.clock()
 			local groundPos
 			repeat
-				task.wait(0.2)
+				task.wait(0.15)
 				local origin = Vector3.new(island.pos.X, safeY, island.pos.Z)
-				local result = workspace:Raycast(origin, Vector3.new(0, -400, 0))
+				-- 800 studs of range covers any island including sky-high tops
+				local result = workspace:Raycast(origin, Vector3.new(0, -800, 0), params)
 				if result then groundPos = result.Position end
-			until groundPos or (os.clock() - t0 > 4)
+			until groundPos or (os.clock() - t0 > 3)
 
-			-- Keep the player from getting stuck if the raycast never lands
-			-- (sky island with no platform under our XZ etc). Fall back to
-			-- the original marker Y + a generous lift.
+			-- Fallback: if we couldn't find ground (extremely unlikely with
+			-- corrected coords), put them at the bbox top +2 — still
+			-- standable, definitely not in the ocean.
 			if not groundPos then
-				groundPos = Vector3.new(island.pos.X, island.pos.Y + 6, island.pos.Z)
+				groundPos = Vector3.new(island.pos.X, island.pos.Y + 2, island.pos.Z)
 			end
 			if hrp and hrp.Parent then
 				hrp.CFrame = CFrame.new(groundPos + Vector3.new(0, 5, 0))
@@ -382,13 +397,18 @@ function Module.start(lib)
 	end
 
 	-- Are we close enough to the island to consider ourselves "there"?
+	-- XZ-only distance — island.pos.Y is the bbox top, but the player
+	-- stands on the ground far below, so a 3D check would always fail
+	-- for tall/sky islands.
 	local function atIsland(name)
 		local island = ISLAND_BY_NAME[name]
 		if not island then return false end
 		local ch = LocalPlayer.Character
 		local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
 		if not hrp then return false end
-		return (hrp.Position - island.pos).Magnitude < 280
+		local dx = hrp.Position.X - island.pos.X
+		local dz = hrp.Position.Z - island.pos.Z
+		return math.sqrt(dx * dx + dz * dz) < 350
 	end
 
 	-- ═══════════════════════════ AUTO SEA 1 ═══════════════════════════
