@@ -101,12 +101,14 @@ local function boot()
 	local Helpers = fetchModule("/lib/helpers.lua")
 	local Toast   = fetchModule("/lib/toast.lua")
 	local UI      = fetchModule("/lib/ui.lua")
+	local ESP     = fetchModule("/lib/esp.lua")
 
-	-- Toast + UI both need Theme injected. Notification predicate is
+	-- Toast + UI + ESP all need Theme injected. Notification predicate is
 	-- left as default-on; game modules override via Toast.init again
 	-- once their cfg.notifyInGame is wired.
 	Toast.init({ theme = Theme })
 	UI.init({ theme = Theme })
+	ESP.init({ theme = Theme })
 
 	-- The bundle passed to every game.start(lib)
 	local lib = {
@@ -114,6 +116,7 @@ local function boot()
 		helpers = Helpers,
 		toast   = Toast,
 		ui      = UI,
+		esp     = ESP,
 	}
 
 	-- Game registry. Edit this when adding a new game module.

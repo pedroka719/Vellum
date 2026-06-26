@@ -34,6 +34,7 @@ function Module.start(lib)
 	local UI      = lib.ui
 	local Toast   = lib.toast
 	local Helpers = lib.helpers
+	local ESP     = lib.esp
 
 	local LocalPlayer = Players.LocalPlayer
 
@@ -82,6 +83,13 @@ function Module.start(lib)
 		farmLevelMax = 9999,
 		farmTargetName = "",        -- "" = any enemy. Set to "Bandit" etc.
 		aggressiveRange = false,    -- pull target under us each tick (ignores server range)
+
+		-- auto sea progression
+		autoSea1 = false,            -- pick best quest for level + TP + accept + farm
+		-- auto-island progression toggle (drives autoSea1's TP behavior)
+
+		-- island ESP
+		espIslands = true,           -- billboard names over each island
 
 		-- stat allocation
 		autoStats = false,
@@ -257,6 +265,183 @@ function Module.start(lib)
 		return best
 	end
 
+	-- ═══════════════════════════ ISLAND MAP ═══════════════════════════
+	-- Sea 1 destinations. Coordinates are spawn-points pulled from the
+	-- recon pass (workspace._WorldOrigin.Locations). Y is the walkable
+	-- surface level — TPing here drops the player on solid ground.
+	local ISLANDS = {
+		{ name = "Pirate Starter",  pos = Vector3.new(1014, 17,  1462), lvlRange = "Lv 1-9"     },
+		{ name = "Marine Starter",  pos = Vector3.new(-2921, -10, 2111), lvlRange = "Lv 1-9"    },
+		{ name = "Middle Town",     pos = Vector3.new(-833, 6,   1628), lvlRange = "Lv 10-14"   },
+		{ name = "Jungle",          pos = Vector3.new(-1419, 8,  -76),  lvlRange = "Lv 15-29"   },
+		{ name = "Pirate Village",  pos = Vector3.new(-1133, 5,  4176), lvlRange = "Lv 30-59"   },
+		{ name = "Desert",          pos = Vector3.new(1193, 7,   4430), lvlRange = "Lv 60-89"   },
+		{ name = "Frozen Village",  pos = Vector3.new(1276, 5,  -1472), lvlRange = "Lv 90-119"  },
+		{ name = "Marine Fortress", pos = Vector3.new(-4935, 8,  4318), lvlRange = "Lv 120-149" },
+		{ name = "Skylands",        pos = Vector3.new(-4622, 845,-1817),lvlRange = "Lv 150-249" },
+		{ name = "Prison",          pos = Vector3.new(5277, 4,   743),  lvlRange = "Lv 250-324" },
+		{ name = "Colosseum",       pos = Vector3.new(-1685, 14, -3200),lvlRange = "PvP"        },
+		{ name = "Magma Village",   pos = Vector3.new(-5528, 5,  8691), lvlRange = "Lv 325-449" },
+		{ name = "Underwater City", pos = Vector3.new(61379, 5,  1473), lvlRange = "Lv 450-624" },
+		{ name = "Fountain City",   pos = Vector3.new(5717, 38,  4356), lvlRange = "Lv 625-749" },
+	}
+
+	local ISLAND_BY_NAME = {}
+	for _, i in ipairs(ISLANDS) do ISLAND_BY_NAME[i.name] = i end
+
+	-- TP via direct CFrame write. User-confirmed: BF tolerates one-shot
+	-- island TPs; the detection vector is mid-combat micro-teleports we
+	-- already avoid with the tween/lerp combat path. Single CFrame set,
+	-- velocity zeroed, no further movement until natural input.
+	local function tpToIsland(name)
+		local island = ISLAND_BY_NAME[name]
+		if not island then return false end
+		local ch = LocalPlayer.Character
+		local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+		if not hrp then return false end
+		hrp.CFrame = CFrame.new(island.pos + Vector3.new(0, 4, 0))
+		hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+		return true
+	end
+
+	-- ═══════════════════════════ QUEST ATLAS ═══════════════════════════
+	-- Sea 1 quest progression. Each entry: level range, the island where
+	-- the quest giver lives, the questId to fire via CommF_:StartQuest,
+	-- the tier string, and the mob name(s) the quest credits.
+	--
+	-- IDs are community-documented BF quest names. If any fails (server
+	-- returns nil / no quest accepts), the spy buffer will log it and we
+	-- fix that single row. Captured for-real so-far: BanditQuest1 tier 1.
+	local SEA1_QUESTS = {
+		{ lvlMin = 1,   lvlMax = 9,   island = "Pirate Starter",  questId = "BanditQuest1",  tier = "1", mob = "Bandit"       },
+		{ lvlMin = 10,  lvlMax = 14,  island = "Pirate Starter",  questId = "BanditQuest1",  tier = "2", mob = "Brute"        },
+		{ lvlMin = 15,  lvlMax = 29,  island = "Jungle",          questId = "JungleQuest",   tier = "1", mob = "Monkey"       },
+		{ lvlMin = 30,  lvlMax = 39,  island = "Jungle",          questId = "JungleQuest",   tier = "2", mob = "Gorilla"      },
+		{ lvlMin = 40,  lvlMax = 59,  island = "Pirate Village",  questId = "BuggyQuest1",   tier = "1", mob = "Pirate"       },
+		{ lvlMin = 60,  lvlMax = 74,  island = "Desert",          questId = "DesertQuest",   tier = "1", mob = "Desert Bandit" },
+		{ lvlMin = 75,  lvlMax = 89,  island = "Desert",          questId = "DesertQuest",   tier = "2", mob = "Desert Officer"},
+		{ lvlMin = 90,  lvlMax = 99,  island = "Frozen Village",  questId = "SnowQuest",     tier = "1", mob = "Snow Bandit"  },
+		{ lvlMin = 100, lvlMax = 119, island = "Frozen Village",  questId = "SnowQuest",     tier = "2", mob = "Snowman"      },
+		{ lvlMin = 120, lvlMax = 149, island = "Marine Fortress", questId = "MarineQuest2",  tier = "1", mob = "Chief Petty Officer" },
+		{ lvlMin = 150, lvlMax = 174, island = "Skylands",        questId = "SkyQuest",      tier = "1", mob = "Sky Bandit"   },
+		{ lvlMin = 175, lvlMax = 189, island = "Skylands",        questId = "SkyQuest",      tier = "2", mob = "Dark Master"  },
+		{ lvlMin = 190, lvlMax = 249, island = "Skylands",        questId = "SkyQuest",      tier = "3", mob = "Prisoner"     },
+		{ lvlMin = 250, lvlMax = 274, island = "Prison",          questId = "PrisonerQuest", tier = "1", mob = "Prisoner"     },
+		{ lvlMin = 275, lvlMax = 299, island = "Prison",          questId = "PrisonerQuest", tier = "2", mob = "Dangerous Prisoner" },
+		{ lvlMin = 300, lvlMax = 324, island = "Prison",          questId = "PrisonerQuest", tier = "3", mob = "Toga Warrior" },
+		{ lvlMin = 325, lvlMax = 374, island = "Magma Village",   questId = "MagmaQuest",    tier = "1", mob = "Magma Ninja"  },
+		{ lvlMin = 375, lvlMax = 449, island = "Magma Village",   questId = "MagmaQuest",    tier = "2", mob = "Military Soldier" },
+		{ lvlMin = 450, lvlMax = 524, island = "Underwater City", questId = "FishmanQuest",  tier = "1", mob = "Fishman Warrior" },
+		{ lvlMin = 525, lvlMax = 624, island = "Underwater City", questId = "FishmanQuest",  tier = "2", mob = "Fishman Commando" },
+		{ lvlMin = 625, lvlMax = 699, island = "Fountain City",   questId = "SkyExp1Quest",  tier = "1", mob = "God's Guard"  },
+		{ lvlMin = 700, lvlMax = 874, island = "Fountain City",   questId = "FountainQuest", tier = "1", mob = "Marine Lieutenant" },
+		{ lvlMin = 875, lvlMax = 999, island = "Fountain City",   questId = "FountainQuest", tier = "2", mob = "Marine Captain" },
+	}
+
+	-- Picks the highest-level-fit quest for a given player level.
+	local function pickQuest(level)
+		for _, q in ipairs(SEA1_QUESTS) do
+			if level >= q.lvlMin and level <= q.lvlMax then return q end
+		end
+		return nil
+	end
+
+	-- Are we close enough to the island to consider ourselves "there"?
+	local function atIsland(name)
+		local island = ISLAND_BY_NAME[name]
+		if not island then return false end
+		local ch = LocalPlayer.Character
+		local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+		if not hrp then return false end
+		return (hrp.Position - island.pos).Magnitude < 280
+	end
+
+	-- ═══════════════════════════ AUTO SEA 1 ═══════════════════════════
+	-- Single-toggle progression. Each tick:
+	--   1. Look up the best quest for the current Data.Level
+	--   2. If not on that island, TP there
+	--   3. If no quest accepted, fire StartQuest
+	--   4. Set the manual farm filters to match the quest mob + level range
+	--   5. Existing flight/attack loop handles the killing
+	--
+	-- The script doesn't try to confirm quest-accepted from a server reply
+	-- (the verb is fire-and-forget). We keep a soft state of "last accepted"
+	-- and re-accept if the level outgrows the previous quest's range.
+	local autoSeaState = { lastQuestKey = nil }
+
+	local function autoSea1Tick()
+		local level = LocalPlayer.Data.Level.Value
+		local quest = pickQuest(level)
+		if not quest then
+			-- Level past Sea 1's farmable range — turn off + notify
+			cfg.autoSea1 = false
+			Toast.show({
+				title = "Sea 1 complete",
+				body  = "Level " .. level .. " is past the Sea 1 quest atlas. Switch to Sea 2 (coming soon).",
+				kind  = "success", duration = 12,
+			})
+			return
+		end
+
+		-- TP to the quest's island if we aren't there yet
+		if not atIsland(quest.island) then
+			tpToIsland(quest.island)
+			task.wait(0.8)  -- let streaming catch up
+			autoSeaState.lastQuestKey = nil  -- re-accept after TP
+			return
+		end
+
+		-- Accept quest if we haven't yet (or moved to a new quest tier)
+		local key = quest.questId .. "|" .. quest.tier
+		if autoSeaState.lastQuestKey ~= key then
+			safe(function() R.CommF_:InvokeServer("StartQuest", quest.questId, quest.tier) end)
+			autoSeaState.lastQuestKey = key
+			Toast.show({
+				title = "Quest accepted",
+				body  = quest.mob .. " (Lv " .. quest.lvlMin .. "-" .. quest.lvlMax .. ")",
+				kind  = "info", duration = 4,
+				key   = "quest:" .. key,
+			})
+		end
+
+		-- Drive the existing farm filters
+		cfg.farmTargetName = quest.mob
+		cfg.farmLevelMin   = quest.lvlMin
+		cfg.farmLevelMax   = quest.lvlMax + 5  -- small margin for tier overlap
+	end
+
+	-- ═══════════════════════════ ISLAND ESP ═══════════════════════════
+	-- One billboard per island, group "islands". Re-anchored to a small
+	-- invisible BasePart at the island's pos so the BillboardGui has
+	-- something concrete to attach to (BillboardGui.Adornee needs a part).
+	local espAnchors = {}  -- name → Part
+	local function buildIslandESP()
+		ESP.detachGroup("islands")
+		for _, c in pairs(espAnchors) do if c.Parent then c:Destroy() end end
+		espAnchors = {}
+		if not cfg.espIslands then return end
+
+		for _, island in ipairs(ISLANDS) do
+			local anchor = Instance.new("Part")
+			anchor.Name = "Vellum_IslandAnchor_" .. island.name
+			anchor.Size = Vector3.new(1, 1, 1)
+			anchor.Anchored = true
+			anchor.CanCollide = false
+			anchor.Transparency = 1
+			anchor.Position = island.pos + Vector3.new(0, 60, 0)
+			anchor.Parent = workspace
+			espAnchors[island.name] = anchor
+			ESP.billboard({
+				adornee = anchor,
+				text    = island.name,
+				sub     = island.lvlRange,
+				color   = Color3.fromRGB(220, 200, 140),
+				group   = "islands",
+				yOffset = 0,
+			})
+		end
+	end
+
 	-- ═══════════════════════════ LOOPS ═══════════════════════════
 
 	-- One always-on flight connection while auto-farm is enabled. Picks
@@ -329,6 +514,17 @@ function Module.start(lib)
 				hrp.CFrame = hrp.CFrame:Lerp(desired, math.min(1, dt * 10))
 			end
 		end)
+	end
+
+	local function autoSea1Loop()
+		while gui.Parent do
+			if cfg.autoSea1 then
+				safe(autoSea1Tick)
+				-- auto-Sea-1 implies auto-farm; flip it on if user forgot
+				cfg.autoFarm = true
+			end
+			jwait(3.0)  -- check every 3s; no need to thrash quest logic
+		end
 	end
 
 	local function autoFarmLoop()
@@ -465,6 +661,44 @@ function Module.start(lib)
 		function(v) cfg.farmLevelMax = v end,
 		{ 25, 50, 100, 250, 500, 9999 })
 
+	-- ─── SEA 1 TAB ───
+	local sea1 = ui.newPage("sea1")
+	ui.sectionLabel(sea1, "AUTO PROGRESSION")
+	ui.toggleRow(sea1, "Auto Sea 1 (quest + island chain)",
+		function() return cfg.autoSea1 end,
+		function(v)
+			cfg.autoSea1 = v
+			if v then
+				if not getHash() then
+					Toast.show({
+						title = "Hash not captured",
+						body  = "M1 once on any enemy first, then re-enable.",
+						kind = "warn", duration = 8,
+					})
+				end
+				cfg.autoFarm = true  -- auto-farm is implied
+			end
+		end)
+
+	ui.sectionLabel(sea1, "ISLAND ESP")
+	ui.toggleRow(sea1, "Show island markers",
+		function() return cfg.espIslands end,
+		function(v) cfg.espIslands = v; buildIslandESP() end)
+
+	ui.sectionLabel(sea1, "MANUAL TP")
+	-- Two-column scroll of island buttons. Direct CFrame TP (user-tested safe).
+	for _, island in ipairs(ISLANDS) do
+		ui.actionBtn(sea1, "TP to " .. island.name .. "  (" .. island.lvlRange .. ")", function()
+			local ok = tpToIsland(island.name)
+			Toast.show({
+				title = ok and ("Teleported") or "TP failed",
+				body  = island.name,
+				kind  = ok and "success" or "warn", duration = 3,
+				key   = "tp:" .. island.name,
+			})
+		end)
+	end
+
 	-- ─── STATS TAB ───
 	local statsPage = ui.newPage("stats")
 	ui.sectionLabel(statsPage, "AUTO STAT ALLOCATION")
@@ -537,12 +771,17 @@ function Module.start(lib)
 	end)
 
 	ui.newTab("farm",     "Farm",     1)
-	ui.newTab("stats",    "Stats",    2)
-	ui.newTab("settings", "Settings", 3)
+	ui.newTab("sea1",     "Sea 1",    2)
+	ui.newTab("stats",    "Stats",    3)
+	ui.newTab("settings", "Settings", 4)
 	ui.setActiveTab("farm")
+
+	-- Build island ESP if enabled at boot
+	buildIslandESP()
 
 	-- ═══════════════════════════ KICK OFF ═══════════════════════════
 	task.spawn(autoFarmLoop)
+	task.spawn(autoSea1Loop)
 	task.spawn(autoStatsLoop)
 	task.spawn(trackProgressLoop)
 	antiAfkLoop()
