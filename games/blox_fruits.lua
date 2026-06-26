@@ -289,18 +289,53 @@ function Module.start(lib)
 	local ISLAND_BY_NAME = {}
 	for _, i in ipairs(ISLANDS) do ISLAND_BY_NAME[i.name] = i end
 
-	-- TP via direct CFrame write. User-confirmed: BF tolerates one-shot
-	-- island TPs; the detection vector is mid-combat micro-teleports we
-	-- already avoid with the tween/lerp combat path. Single CFrame set,
-	-- velocity zeroed, no further movement until natural input.
+	-- Streaming-safe island TP. The naive "CFrame to island.pos + 4" path
+	-- works for the local island but fails on anything far away — the
+	-- chunk hasn't streamed in yet, the player falls through air past
+	-- FallenPartsDestroyHeight, and BF respawns them at their saved
+	-- SpawnPoint (which is why every "TP somewhere new" went back to
+	-- Pirate Starter).
+	--
+	-- The robust path:
+	--   1. Drop player 80 studs above the island marker
+	--   2. Anchor the HRP so they stay there while chunks load
+	--   3. Raycast down every 0.2s looking for ground; once found, unanchor
+	--      and place the player on it. 4s timeout for safety.
 	local function tpToIsland(name)
 		local island = ISLAND_BY_NAME[name]
 		if not island then return false end
 		local ch = LocalPlayer.Character
 		local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
 		if not hrp then return false end
-		hrp.CFrame = CFrame.new(island.pos + Vector3.new(0, 4, 0))
+
+		local safeY = island.pos.Y + 80
+		local aboveCF = CFrame.new(Vector3.new(island.pos.X, safeY, island.pos.Z))
+		hrp.CFrame = aboveCF
 		hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+		hrp.Anchored = true
+
+		task.spawn(function()
+			local t0 = os.clock()
+			local groundPos
+			repeat
+				task.wait(0.2)
+				local origin = Vector3.new(island.pos.X, safeY, island.pos.Z)
+				local result = workspace:Raycast(origin, Vector3.new(0, -400, 0))
+				if result then groundPos = result.Position end
+			until groundPos or (os.clock() - t0 > 4)
+
+			-- Keep the player from getting stuck if the raycast never lands
+			-- (sky island with no platform under our XZ etc). Fall back to
+			-- the original marker Y + a generous lift.
+			if not groundPos then
+				groundPos = Vector3.new(island.pos.X, island.pos.Y + 6, island.pos.Z)
+			end
+			if hrp and hrp.Parent then
+				hrp.CFrame = CFrame.new(groundPos + Vector3.new(0, 5, 0))
+				hrp.Anchored = false
+				hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+			end
+		end)
 		return true
 	end
 
