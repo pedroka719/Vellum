@@ -19,7 +19,13 @@
 --   For dev, swap BASE to a local override or use a single bundled file
 --   (see TODO at bottom — bundler script not yet written).
 
-local BASE = "https://raw.githubusercontent.com/Pekenz/vellum/main"
+local REPO = "Pekenz/vellum"
+local REF  = "main"
+-- BASE is rewritten at boot to pin against the latest commit SHA. Fastly
+-- caches raw.githubusercontent.com/<repo>/main/* by path (querystrings
+-- are stripped), so even a fresh push can sit invisible behind a 5-minute
+-- HIT. SHA-pinned URLs are unique per commit → always X-Cache MISS.
+local BASE
 
 -- ─────────────── module fetching ───────────────
 -- Each lib module returns a table. We HttpGet the source, loadstring it,
@@ -68,9 +74,28 @@ local function fetchModule(path)
 	return mod
 end
 
+-- ─────────────── sha resolution ───────────────
+-- Fetch the latest commit on REF via the github API (not Fastly-cached the
+-- same way raw.githubusercontent is) and pin BASE to that sha. If the API
+-- call fails for any reason — rate limit, no network — we fall back to the
+-- branch URL and live with the cache window.
+local function resolveBase()
+	local apiUrl = "https://api.github.com/repos/" .. REPO .. "/commits/" .. REF
+	local ok, body = pcall(httpFetch, apiUrl)
+	if ok and body and body ~= "" then
+		local sha = body:match('"sha"%s*:%s*"([0-9a-f]+)"')
+		if sha and #sha >= 7 then
+			return "https://raw.githubusercontent.com/" .. REPO .. "/" .. sha
+		end
+	end
+	return "https://raw.githubusercontent.com/" .. REPO .. "/" .. REF
+end
+
 -- ─────────────── boot ───────────────
 
 local function boot()
+	BASE = resolveBase()
+
 	-- lib: order matters for the deps that need init
 	local Theme   = fetchModule("/lib/theme.lua")
 	local Helpers = fetchModule("/lib/helpers.lua")
