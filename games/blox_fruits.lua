@@ -259,35 +259,74 @@ function Module.start(lib)
 
 	-- ═══════════════════════════ LOOPS ═══════════════════════════
 
-	-- Smooth-follow: Heartbeat-driven damped lerp toward the hover target.
-	-- Position-only offset (NOT ehrp.CFrame * offset) so the bandit's
-	-- rotation doesn't drag us in an orbit around them. Damping factor 10
-	-- means we close ~63% of the gap each second — reads as floaty pursuit,
-	-- not teleport jitter. When aggressive mode is on we also write the
-	-- bandit's HRP under the player so we can attack from arbitrary height.
-	local hoverConn
-	local savedTargetCFrame  -- so we can release the bandit when done
-	local function stopHover()
-		if hoverConn then hoverConn:Disconnect(); hoverConn = nil end
-		savedTargetCFrame = nil
+	-- One always-on flight connection while auto-farm is enabled. Picks
+	-- the best target each frame, hovers above it, and when no target
+	-- is in range, holds the last altitude (so we don't fall between kills).
+	--
+	-- Aggressive mode: instead of letting the server reject the hit on
+	-- distance, we write the target's HRP to (player.X, target_original_Y,
+	-- player.Z) — XZ tracks us, Y stays at ground. This breaks the
+	-- "we hover above target, target snaps under us, hover Y rises forever"
+	-- feedback loop the previous attempt had.
+	local flightConn
+	local currentTarget        -- shared with the attack loop
+	local lastHoldY            -- Y to hold when no enemy in range
+	local targetOriginalY      -- the Y the current target spawned at
+	local hoverEnabled = false -- only run flight while auto-farm is on
+
+	local function stopFlight()
+		hoverEnabled = false
+		if flightConn then flightConn:Disconnect(); flightConn = nil end
+		currentTarget = nil
+		targetOriginalY = nil
 	end
-	local function startHover(enemy)
-		stopHover()
-		hoverConn = RunService.Heartbeat:Connect(function(dt)
-			if not (cfg.autoFarm and enemy and enemy.Parent) then stopHover(); return end
+
+	local function startFlight()
+		if flightConn then return end
+		hoverEnabled = true
+		flightConn = RunService.Heartbeat:Connect(function(dt)
+			if not (hoverEnabled and cfg.autoFarm) then stopFlight(); return end
+
 			local ch = LocalPlayer.Character
 			local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
-			local ehrp = enemy:FindFirstChild("HumanoidRootPart")
-			if not (hrp and ehrp) then return end
+			if not hrp then return end
 
-			-- pure-position desired spot (no rotation contamination)
-			local desired = CFrame.new(ehrp.Position + Vector3.new(0, cfg.farmHeight, 0))
-			hrp.CFrame = hrp.CFrame:Lerp(desired, math.min(1, dt * 10))
+			-- Kill any residual velocity so gravity can't accumulate downward
+			-- drift between heartbeats. We're CFrame-driven now.
+			hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
 
-			-- aggressive: bring target under us each tick, ignore server range
-			if cfg.aggressiveRange then
-				if not savedTargetCFrame then savedTargetCFrame = ehrp.CFrame end
-				ehrp.CFrame = hrp.CFrame * CFrame.new(0, -3, 0)
+			-- Pick target each frame; lets us seamlessly switch when one dies
+			local enemy = (currentTarget and currentTarget.Parent) and currentTarget or pickEnemy()
+			currentTarget = enemy
+
+			local desired
+			if enemy then
+				local ehrp = enemy:FindFirstChild("HumanoidRootPart")
+				if ehrp then
+					if not targetOriginalY then
+						targetOriginalY = ehrp.Position.Y
+					end
+					-- Hover at a FIXED altitude (target's original Y + height)
+					-- so the aggressive pull can't push us into orbit
+					local hoverY = targetOriginalY + cfg.farmHeight
+					lastHoldY = hoverY
+					desired = CFrame.new(ehrp.Position.X, hoverY, ehrp.Position.Z)
+
+					-- Aggressive: pull target's HRP to (player.X, original_Y,
+					-- player.Z). XZ tracks us, Y locked at ground. No drift.
+					if cfg.aggressiveRange then
+						ehrp.CFrame = CFrame.new(hrp.Position.X, targetOriginalY, hrp.Position.Z)
+					end
+				end
+			else
+				-- No enemy in range: just hold altitude where we were
+				targetOriginalY = nil
+				local holdY = lastHoldY or hrp.Position.Y
+				desired = CFrame.new(hrp.Position.X, holdY, hrp.Position.Z)
+			end
+
+			if desired then
+				hrp.CFrame = hrp.CFrame:Lerp(desired, math.min(1, dt * 10))
 			end
 		end)
 	end
@@ -295,42 +334,33 @@ function Module.start(lib)
 	local function autoFarmLoop()
 		while gui.Parent do
 			if cfg.autoFarm and getHash() then
+				if not flightConn then startFlight() end
+
 				safe(function()
-					local enemy = pickEnemy()
-					if not enemy then
-						stopHover()
-						jwait(0.5); return
+					-- Wait until flight has acquired a target
+					local enemy = currentTarget
+					if not enemy or not enemy.Parent then
+						jwait(0.3); return
 					end
 
-					-- Long-distance approach: tween smoothly toward the hover
-					-- spot. Once there, hand off to the Heartbeat follower.
-					local approachCF = enemy.HumanoidRootPart.CFrame * CFrame.new(0, cfg.farmHeight, 0)
-					tweenTo(approachCF)
-					-- wait until we're near (or 1.5s timeout if path blocked)
-					local t0 = os.clock()
-					repeat
-						task.wait(0.05)
-						local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-						local ehrp = enemy:FindFirstChild("HumanoidRootPart")
-						if hrp and ehrp and (hrp.Position - (ehrp.Position + Vector3.new(0, cfg.farmHeight, 0))).Magnitude < 6 then break end
-					until os.clock() - t0 > 1.5 or not (enemy and enemy.Parent and cfg.autoFarm)
-
-					startHover(enemy)
-
+					-- Attack until target dies. Flight loop keeps repositioning
+					-- and switching targets independently.
 					local guard = 0
 					while enemy.Parent and cfg.autoFarm and guard < 200 do
 						attackOnce(enemy)
 						guard = guard + 1
 						jwait(cfg.attackCadence)
 					end
-					stopHover()
 
 					if enemy and not enemy.Parent then
 						stats.sessionKills = stats.sessionKills + 1
+						-- Reset target memory so flight picks the next enemy
+						currentTarget = nil
+						targetOriginalY = nil
 					end
 				end)
 			else
-				stopHover()
+				stopFlight()
 				jwait(0.5)
 			end
 		end
