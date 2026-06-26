@@ -48,7 +48,9 @@ local function ensureHost()
 	sg.Name = "Vellum_Toasts"
 	sg.ResetOnSpawn = false
 	sg.IgnoreGuiInset = true
-	sg.DisplayOrder = 999
+	-- One higher than the main panel (1000000) so notifications stay visible
+	-- when the panel is open or transitioning.
+	sg.DisplayOrder = 1000001
 	sg.Parent = (gethui and gethui()) or CoreGui
 	HOST = sg
 	HOLDER = Instance.new("Frame", sg)

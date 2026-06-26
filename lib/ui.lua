@@ -80,6 +80,9 @@ function UI.mount(opts)
 	gui.ResetOnSpawn = false
 	gui.IgnoreGuiInset = true
 	gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+	-- Render above the game's own UI. Most games stack between 0-1000; we
+	-- pick well past that so Vellum stays clickable. Toasts go one higher.
+	gui.DisplayOrder = 1000000
 	gui.Parent = host
 
 	local root = Instance.new("Frame")
