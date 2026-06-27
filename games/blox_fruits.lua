@@ -322,7 +322,7 @@ function Module.start(lib)
 	-- velocity-mag throttle. 60K-stud trips (UC ↔ start area) take ~90s
 	-- which is still better than getting rolled back forever.
 	local TP_BV_SPEED = 700
-	local TP_CRUISE_Y = 250  -- safe altitude above all ground obstacles
+	local TP_CRUISE_Y = 80   -- modest altitude above all ground obstacles
 	local activeTpBV
 
 	-- Raycast params builder shared across teleport helpers.
