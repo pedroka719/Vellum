@@ -218,12 +218,27 @@ function Module.start(lib)
 		local oldIdx
 		oldIdx = hookmetamethod(game, "__index", function(self, key)
 			if SPY._captureMode and SPY._captureTarget then
-				if (key == "Hit" or key == "Target") and typeof(self) == "Instance" and self:IsA("Mouse") then
+				if typeof(self) == "Instance" and self:IsA("Mouse") then
 					local target = SPY._captureTarget
+					local targetCF = oldIdx(target, "CFrame")
+					local targetPos = oldIdx(targetCF, "Position")
 					if key == "Hit" then
-						return oldIdx(target, "CFrame")
-					else
+						return targetCF
+					elseif key == "Target" then
 						return target
+					elseif key == "Origin" then
+						-- Camera position is a fine origin; UnitRay derives from this
+						return oldIdx(workspace.CurrentCamera, "CFrame")
+					elseif key == "UnitRay" then
+						local camCF = oldIdx(workspace.CurrentCamera, "CFrame")
+						local camPos = oldIdx(camCF, "Position")
+						return Ray.new(camPos, (targetPos - camPos).Unit)
+					elseif key == "X" or key == "Y" then
+						-- Center of screen; combat handlers rarely read these but
+						-- if they do, this is a sane fallback
+						local cam = workspace.CurrentCamera
+						local vp = oldIdx(cam, "ViewportSize")
+						return key == "X" and vp.X * 0.5 or vp.Y * 0.5
 					end
 				end
 			end
@@ -707,21 +722,53 @@ function Module.start(lib)
 						jwait(0.3); return
 					end
 
-					-- No hash yet? Fire Tool.Activated with the mouse hook
-					-- substituting Mouse.Hit/Target → enemy.HRP. BF's combat
-					-- handler runs, reads our substituted target, fires
-					-- RegisterHit normally, the namecall spy catches the hash.
+					-- No hash yet? Aim camera at target, set mouse hook to
+					-- substitute Mouse.* reads with enemy data, fire all three
+					-- signal paths BF combat code might listen on. The handler
+					-- runs, reads our substituted values, fires RegisterHit
+					-- normally, and the namecall spy catches the hash.
 					if not getHash() then
 						local ehrp = enemy:FindFirstChild("HumanoidRootPart")
 						if ehrp then
 							ensureToolEquipped()
+							local cam = workspace.CurrentCamera
+							if cam then
+								cam.CFrame = CFrame.lookAt(cam.CFrame.Position, ehrp.Position)
+								RunService.Heartbeat:Wait()
+							end
+
+							SPY._captureTarget = ehrp
+							SPY._captureMode = true
+
 							local tool = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Tool")
-							if tool and typeof(firesignal) == "function" then
-								SPY._captureTarget = ehrp
-								SPY._captureMode = true
-								pcall(firesignal, tool.Activated)
-								task.wait(0.1)
-								SPY._captureMode = false
+							local fs = firesignal
+							local fired = { tool = false, mouse = false, uis = false }
+
+							if typeof(fs) == "function" then
+								if tool then
+									fired.tool = pcall(fs, tool.Activated)
+								end
+								fired.mouse = pcall(fs, LocalPlayer:GetMouse().Button1Down)
+								local fakeInput = {
+									UserInputType  = Enum.UserInputType.MouseButton1,
+									UserInputState = Enum.UserInputState.Begin,
+									KeyCode        = Enum.KeyCode.Unknown,
+									Position       = Vector3.new(0, 0, 0),
+								}
+								fired.uis = pcall(fs, UserInputService.InputBegan, fakeInput, false)
+							end
+
+							task.wait(0.15)
+							SPY._captureMode = false
+
+							-- One-shot diagnostic so F9 confirms which fires ran
+							if not SPY._fireProbed then
+								SPY._fireProbed = true
+								warn(string.format(
+									"[Vellum BF] fire probe: tool.Activated=%s mouse.Button1Down=%s UIS.InputBegan=%s hash=%s",
+									tostring(fired.tool), tostring(fired.mouse), tostring(fired.uis),
+									tostring(getHash() ~= nil)
+								))
 							end
 						end
 						jwait(0.4)
