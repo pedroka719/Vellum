@@ -43,29 +43,14 @@ function Module.start(lib)
 	local gui
 
 	-- ═══════════════════════════ R TABLE ═══════════════════════════
-	-- Resolved once. Optional remotes resolve via FindFirstChild — events like
-	-- Leviathan/SegmentHit aren't always live at boot, and EquipEvent is a
-	-- per-tool child, NOT a global remote. WaitForChild on those hangs forever.
 	local Net = ReplicatedStorage:WaitForChild("Modules"):WaitForChild("Net")
 	local Remotes = ReplicatedStorage:WaitForChild("Remotes")
 
 	local R = {
-		-- combat (verified, REQUIRED)
 		RegisterAttack = Net:WaitForChild("RE/RegisterAttack"),
 		RegisterHit    = Net:WaitForChild("RE/RegisterHit"),
-		-- dispatchers (REQUIRED)
 		CommF_         = Remotes:WaitForChild("CommF_"),
-		CommF          = Remotes:FindFirstChild("CommF"),
 		CommE          = Remotes:WaitForChild("CommE"),
-		-- direct verbs (optional — present-when-relevant)
-		Stats          = Remotes:FindFirstChild("Stats"),
-		Combo          = Remotes:FindFirstChild("Combo"),
-		Raids          = Remotes:FindFirstChild("Raids"),
-		Leviathan      = Remotes:FindFirstChild("Leviathan"),
-		SegmentHit     = Remotes:FindFirstChild("SegmentHit"),
-		Redeem         = Remotes:FindFirstChild("Redeem"),
-		QuestUpdate    = Remotes:FindFirstChild("QuestUpdate"),
-		Chest          = Remotes:FindFirstChild("Chest"),
 	}
 
 	-- ═══════════════════════════ CONFIG ═══════════════════════════
@@ -76,7 +61,6 @@ function Module.start(lib)
 		-- farm
 		autoFarm = false,
 		farmHeight = 10,            -- studs above target (safe farm)
-		farmTweenSpeed = 350,       -- studs/sec; under the 1500 velocity cap
 		attackCadence = 0.18,       -- sec between RegisterAttack/Hit pairs
 		damageMultiplier = 1.0,     -- 1.0 = always finisher hits
 		farmLevelMin = 0,           -- only attack enemies within range
@@ -86,7 +70,6 @@ function Module.start(lib)
 
 		-- auto sea progression
 		autoSea1 = false,            -- pick best quest for level + TP + accept + farm
-		-- auto-island progression toggle (drives autoSea1's TP behavior)
 
 		-- island ESP
 		espIslands = true,           -- billboard names over each island
@@ -113,9 +96,6 @@ function Module.start(lib)
 		sessionStart = os.clock(),
 	}
 
-	-- The session hash lives in getgenv so script reloads inherit a hash
-	-- captured on a previous boot — user only swings M1 once per Roblox
-	-- session, not once per `loadstring` call.
 	local jwait = Helpers.makeJwait(cfg)
 	local safe = Helpers.makeSafe("Vellum BF")
 
@@ -128,9 +108,8 @@ function Module.start(lib)
 	SPY.log = SPY.log or {}
 	SPY.frozen = false
 
-	-- Teleport-in-progress guard. Prevents the flight loop from interfering
-	-- with BodyVelocity-based island teleportation (CFrame lerp + velocity
-	-- zeroing would counteract the BV and/or trigger anti-cheat rollback).
+	-- Teleport-in-progress guard. Pauses autoFarm + flight while a TP runs
+	-- so the hover loop doesn't fight the tween for HRP control.
 	local _tpInProgress = false
 
 	-- read current hash (may be set from a prior boot)
@@ -183,10 +162,6 @@ function Module.start(lib)
 		SPY.hookInstalled = true
 	end
 
-	-- BF appears to keep the same hash across respawns in the same session,
-	-- but if that ever changes we'll observe it here and add a CharacterAdded
-	-- handler to clear. Left as a noted hook for now.
-
 	-- Punishment detection — if BF kicks us, surface the spy buffer.
 	game:GetService("LogService").MessageOut:Connect(function(msg, mtype)
 		if mtype ~= Enum.MessageType.MessageError then return end
@@ -196,28 +171,6 @@ function Module.start(lib)
 				tostring(#SPY.log) .. " entries. Inspect getgenv().VellumBF.log")
 		end
 	end)
-
-	-- ═══════════════════════════ MOVEMENT (TWEEN ONLY) ═══════════════════════════
-	-- The velocity guard zeroes >1500 mag. ~350 studs/sec is fast travel and safe.
-	-- Returns the tween so callers can :Wait()/:Cancel().
-	local activeTween
-	local function tweenTo(targetCF)
-		local ch = LocalPlayer.Character
-		local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
-		if not hrp then return nil end
-
-		if activeTween then pcall(function() activeTween:Cancel() end) end
-
-		local dist = (targetCF.Position - hrp.Position).Magnitude
-		local duration = math.max(0.05, dist / cfg.farmTweenSpeed)
-		activeTween = TweenService:Create(
-			hrp,
-			TweenInfo.new(duration, Enum.EasingStyle.Linear),
-			{ CFrame = targetCF }
-		)
-		activeTween:Play()
-		return activeTween
-	end
 
 	-- ═══════════════════════════ COMBAT ═══════════════════════════
 	local BODY_PARTS = {
@@ -271,15 +224,9 @@ function Module.start(lib)
 	end
 
 	-- ═══════════════════════════ ISLAND MAP ═══════════════════════════
-	-- Sea 1 destinations. Coordinates come from the game's own Locations
-	-- folder CFrames (workspace._WorldOrigin.Locations.<island>.CFrame) —
-	-- these are the literal positions BF uses to register "you're at this
-	-- island". They sit at sea-level for ground islands and at the actual
-	-- altitude for sky islands.
-	--
-	-- We lift Y by 6 in the tween so the player lands ON the dock, not
-	-- under the water. Surface-finding via raycast was abandoned because
-	-- the post-tween CFrame jump triggered BF's server rollback.
+	-- Sea 1 destinations. Coordinates come from workspace._WorldOrigin.Locations
+	-- — the same positions BF uses to register "you're at this island". Surface
+	-- and clearance handled per-TP by _findClearLanding via raycast.
 	local ISLANDS = {
 		{ name = "Pirate Starter",  pos = Vector3.new(1014, 16,  1462),  lvlRange = "Lv 1-9"     },
 		{ name = "Marine Starter",  pos = Vector3.new(-2921, -4,  2111), lvlRange = "Lv 1-9"     },
@@ -300,58 +247,24 @@ function Module.start(lib)
 	local ISLAND_BY_NAME = {}
 	for _, i in ipairs(ISLANDS) do ISLAND_BY_NAME[i.name] = i end
 
-	-- Island TP via BodyVelocity-driven physics motion. Decoded by capturing
-	-- Ronix Hub's behavior: their 2,277 BodyVelocity instances during normal
-	-- play, vs zero metamethod hits on hrp.CFrame writes, told us they
-	-- don't teleport — they fly the player there via physics.
+	-- Island TP via TweenService. Empirically: BF's anti-cheat rejects single
+	-- CFrame deltas > ~10K studs (rollback) and flags sustained BodyVelocity
+	-- (rollback + kick). Tween CFrame writes don't register as either.
 	--
-	-- Why physics wins over CFrame writes:
-	--   * `hrp.CFrame = ...` and `Model:PivotTo()` both ask the server to
-	--     accept an instant position change. After the first kick the
-	--     server gets strict and rolls them back to LastSpawnPoint.
-	--   * Continuous CFrame writes (TweenService) get the engine to derive
-	--     velocity from CFrame deltas; the fling-fix script throttles any
-	--     velocity above 750 to mag 100; tween desyncs.
-	--   * BodyVelocity sets a real physics velocity. The engine integrates
-	--     it normally. Server treats motion as legitimate physical movement
-	--     — same path used by every other physics-based ability in BF
-	--     (dash, jump, double jump). No rollback even from inside an
-	--     anti-cheat-strict zone like Underwater City.
+	--   * Near islands (< TP_HOP_DIST): one tween at 350 studs/sec.
+	--   * Far islands: segmented hops of ≤TP_HOP_DIST at 1500 studs/sec with
+	--     a 0.3s pause between hops to reset the unnatural-movement timer.
 	--
-	-- Speed capped at 700 studs/sec to stay under the fling-fix's 750
-	-- velocity-mag throttle. 60K-stud trips (UC ↔ start area) take ~90s
-	-- which is still better than getting rolled back forever.
-	-- Teleport via tweens at farm-safe speed for nearby islands.
-	-- For far islands (>10K studs), we split into multiple high-speed
-	-- hops with short pauses between — each hop is fast enough that
-	-- BF doesn't flag it as sustained unnatural movement.
-	-- BodyVelocity was tried at 700 studs/sec but BF flags sustained
-	-- BV and rolls back + kicks the player.
+	-- Verified clean across 57K+ studs (start → Underwater City).
 	local TP_TWEEN_SPEED = 350
 	local TP_HIGH_SPEED = 1500
 	local TP_HOP_DIST = 15000
 
-	local TELEPORT_PADS = {
-		["Underwater City"] = {
-			entrance = Vector3.new(4050, 3, -1814),
-			exit = Vector3.new(61163, 12, 1819),
-		},
-	}
-
-	-- Raycast params builder shared across teleport helpers.
-	-- Excludes the local character and any Vellum ESP anchor parts.
+	-- Forward-declared so tpToIsland can call them. Some executors miscompile
+	-- `local function` forward refs, so we assign into pre-declared locals.
 	local _tpFilterCache
 	local _tpRaycastParams
-
-	-- Probe 12+ XZ offsets from altitude; return the closest clear spot.
-	-- Hardcoded island.pos Y values sit 40-190 studs below terrain AND the
-	-- exact XZ can be inside a building — we need surface detection AND an
-	-- open-air landing to avoid spawning inside terrain or walls.
 	local _findClearLanding
-
-	-- STOP & RESTART flight without forward-reference issues.
-	-- Inlined as a local so executors with broken `local function` hoisting
-	-- still work when called from tpToIsland.
 	local _stopFlightFn
 
 	_tpRaycastParams = function()
@@ -448,47 +361,9 @@ function Module.start(lib)
 			return true
 		end
 
-		-- Use teleporter pad for far islands that have one. Anchor+CFrame to the
-		-- entrance (short hop avoids rollback), then trigger it with an unanchored
-		-- ball so the game physics system warps us server-side to the destination.
-		local pad = TELEPORT_PADS[name]
-		local dist = (dest - hrp.Position).Magnitude
-		local padDist = pad and (pad.entrance - hrp.Position).Magnitude or math.huge
-
-		if pad and padDist < dist and padDist < TP_HOP_DIST then
-			for _, v in ipairs(ch:GetDescendants()) do
-				if v:IsA("BasePart") then v.Anchored = true end
-			end
-			hrp.CFrame = CFrame.new(pad.entrance, pad.entrance - Vector3.new(0, 0, 1))
-			task.wait(0.3)
-
-			local ball = Instance.new("Part")
-			ball.Name = "Vellum_PadTrigger"
-			ball.Size = Vector3.new(5, 5, 5)
-			ball.Shape = Enum.PartType.Ball
-			ball.Anchored = false
-			ball.CanCollide = true
-			ball.CanTouch = true
-			ball.Position = pad.entrance
-			ball.Parent = ch
-
-			for _ = 1, 30 do
-				task.wait(0.5)
-				if (hrp.Position - pad.exit).Magnitude < 500 then
-					dest = pad.exit
-					break
-				end
-			end
-
-			if ball.Parent then ball:Destroy() end
-			for _, v in ipairs(ch:GetDescendants()) do
-				if v:IsA("BasePart") then v.Anchored = false end
-			end
-		end
-
 		-- Single tween for nearby islands; segmented high-speed hops
 		-- for far ones.
-		dist = (dest - hrp.Position).Magnitude
+		local dist = (dest - hrp.Position).Magnitude
 		local needMultiHop = dist > TP_HOP_DIST
 		local speed = needMultiHop and TP_HIGH_SPEED or TP_TWEEN_SPEED
 
@@ -700,25 +575,17 @@ function Module.start(lib)
 	local _hoverBP             -- BodyPosition that holds us in the air
 	local _hoverBG             -- BodyGyro to keep us upright
 
-	-- GATE: _stopFlightFn is defined ahead of this block (near tpToIsland)
-	-- because some executors break `local function` hoisting. Both versions
-	-- do the same thing — the table function exists only for callers that
-	-- reference it by name BEFORE the hoisting bug manifests.
-	local stopFlight = _stopFlightFn
-
 	local function startFlight()
 		if flightConn then return end
 		if _tpInProgress then return end  -- don't start during teleport
 		hoverEnabled = true
 
-		-- BodyPosition + BodyGyro: NO CFrame writes. BF's anti-cheat
-		-- flags HRP.CFrame modifications and rolls back to spawn.
-		-- BodyPosition achieves the same hover effect through physics,
-		-- which the server treats as legitimate movement.
+		-- BodyPosition + BodyGyro hover (no CFrame writes — those trip
+		-- BF's anti-cheat rollback). Server treats it as legitimate physics.
 		local ch = LocalPlayer.Character
 		local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
 		if not hrp then
-			stopFlight()
+			_stopFlightFn()
 			return
 		end
 
@@ -738,15 +605,15 @@ function Module.start(lib)
 		_hoverBG.CFrame = hrp.CFrame
 		_hoverBG.Parent = hrp
 
-		flightConn = RunService.Heartbeat:Connect(function(dt)
-			if not (hoverEnabled and cfg.autoFarm) then stopFlight(); return end
-			if _tpInProgress then stopFlight(); return end
+		flightConn = RunService.Heartbeat:Connect(function()
+			if not (hoverEnabled and cfg.autoFarm) then _stopFlightFn(); return end
+			if _tpInProgress then _stopFlightFn(); return end
 
 			local ch2 = LocalPlayer.Character
 			local hrp2 = ch2 and ch2:FindFirstChild("HumanoidRootPart")
 			if not hrp2 then return end
-			if not _hoverBP or not _hoverBP.Parent then stopFlight(); return end
-			if not _hoverBG or not _hoverBG.Parent then stopFlight(); return end
+			if not _hoverBP or not _hoverBP.Parent then _stopFlightFn(); return end
+			if not _hoverBG or not _hoverBG.Parent then _stopFlightFn(); return end
 
 			-- Pick target each frame; seamlessly switch when one dies
 			local enemy = (currentTarget and currentTarget.Parent) and currentTarget or pickEnemy()
@@ -818,7 +685,7 @@ function Module.start(lib)
 					end
 				end)
 			else
-				stopFlight()
+				_stopFlightFn()
 				jwait(0.5)
 			end
 		end
@@ -860,8 +727,6 @@ function Module.start(lib)
 			local beli = LocalPlayer.Data.Beli.Value
 			if xp > lastXP then
 				stats.sessionXP = stats.sessionXP + (xp - lastXP)
-			elseif xp < lastXP then
-				-- level up reset
 			end
 			if beli > lastBeli then
 				stats.sessionBeli = stats.sessionBeli + (beli - lastBeli)
@@ -908,10 +773,6 @@ function Module.start(lib)
 	ui.toggleRow(farm, "Aggressive range (pull target to you)",
 		function() return cfg.aggressiveRange end,
 		function(v) cfg.aggressiveRange = v end)
-	ui.intervalRow(farm, "Tween speed (studs/sec)",
-		function() return cfg.farmTweenSpeed end,
-		function(v) cfg.farmTweenSpeed = v end,
-		{ 200, 300, 350, 500, 800 })
 
 	ui.sectionLabel(farm, "TARGET FILTER")
 	ui.intervalRow(farm, "Min enemy level",
