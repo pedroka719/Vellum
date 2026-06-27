@@ -321,13 +321,15 @@ function Module.start(lib)
 	-- Speed capped at 700 studs/sec to stay under the fling-fix's 750
 	-- velocity-mag throttle. 60K-stud trips (UC ↔ start area) take ~90s
 	-- which is still better than getting rolled back forever.
-	-- Teleport via continuous tweens at the safe farm speed (350 studs/sec).
-	-- BodyVelocity was tried at 700 studs/sec but BF flags sustained BV
-	-- at that velocity as unnatural and rolls back + kicks the player.
-	-- Tweens generate smaller CFrame deltas per frame that the velocity
-	-- guard (which zeroes >1500 mag) ignores entirely.
+	-- Teleport via tweens at farm-safe speed for nearby islands.
+	-- For far islands (>10K studs), we split into multiple high-speed
+	-- hops with short pauses between — each hop is fast enough that
+	-- BF doesn't flag it as sustained unnatural movement.
+	-- BodyVelocity was tried at 700 studs/sec but BF flags sustained
+	-- BV and rolls back + kicks the player.
 	local TP_TWEEN_SPEED = 350
-	local activeTpBV
+	local TP_HIGH_SPEED = 1500
+	local TP_HOP_DIST = 15000
 
 	-- Raycast params builder shared across teleport helpers.
 	-- Excludes the local character and any Vellum ESP anchor parts.
@@ -439,17 +441,35 @@ function Module.start(lib)
 			return true
 		end
 
-		-- Tween directly to destination in a single smooth movement.
-		-- No altitude climb — the direct path avoids terrain because
-		-- Sea 1 islands sit on open water. Speed matches the farm
-		-- loop's proven-safe tween speed.
+		-- Single tween for nearby islands; segmented high-speed hops
+		-- for far ones so BF doesn't flag sustained movement.
 		local dist = (dest - hrp.Position).Magnitude
-		local duration = math.max(0.1, dist / TP_TWEEN_SPEED)
-		local destCF = CFrame.new(dest, dest - Vector3.new(0, 0, 1))
+		local needMultiHop = dist > TP_HOP_DIST
+		local speed = needMultiHop and TP_HIGH_SPEED or TP_TWEEN_SPEED
 
-		local tween = TweenService:Create(hrp, TweenInfo.new(duration, Enum.EasingStyle.Linear), { CFrame = destCF })
-		tween:Play()
-		tween.Completed:Wait()
+		if needMultiHop then
+			local startPos = hrp.Position
+			local numHops = math.max(2, math.ceil(dist / TP_HOP_DIST))
+			for i = 1, numHops do
+				local t = i / numHops
+				local hopPos = startPos:Lerp(dest, t)
+				local hopDist = (hopPos - hrp.Position).Magnitude
+				if hopDist > 1 then
+					local hopCF = CFrame.new(hopPos, hopPos - Vector3.new(0, 0, 1))
+					local hopDur = math.max(0.1, hopDist / speed)
+					local tween = TweenService:Create(hrp, TweenInfo.new(hopDur, Enum.EasingStyle.Linear), { CFrame = hopCF })
+					tween:Play()
+					tween.Completed:Wait()
+				end
+				if i < numHops then task.wait(0.3) end
+			end
+		else
+			local dur = math.max(0.1, dist / speed)
+			local cf = CFrame.new(dest, dest - Vector3.new(0, 0, 1))
+			local tween = TweenService:Create(hrp, TweenInfo.new(dur, Enum.EasingStyle.Linear), { CFrame = cf })
+			tween:Play()
+			tween.Completed:Wait()
+		end
 
 		-- Settle: brief BodyPosition hold so we don't slide off the landing
 		local bp = Instance.new("BodyPosition")
