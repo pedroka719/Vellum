@@ -219,25 +219,23 @@ function Module.start(lib)
 		oldIdx = hookmetamethod(game, "__index", function(self, key)
 			if SPY._captureMode and SPY._captureTarget then
 				if typeof(self) == "Instance" and self:IsA("Mouse") then
+					-- oldIdx is for Instance __index only — never pass it a
+					-- value type (CFrame, Vector3). Those have native field
+					-- access (.Position, .X, .Y) with no metamethod involved.
 					local target = SPY._captureTarget
-					local targetCF = oldIdx(target, "CFrame")
-					local targetPos = oldIdx(targetCF, "Position")
+					local targetCF = oldIdx(target, "CFrame")  -- Instance → ok
+					local targetPos = targetCF.Position         -- value type
 					if key == "Hit" then
 						return targetCF
 					elseif key == "Target" then
 						return target
 					elseif key == "Origin" then
-						-- Camera position is a fine origin; UnitRay derives from this
 						return oldIdx(workspace.CurrentCamera, "CFrame")
 					elseif key == "UnitRay" then
 						local camCF = oldIdx(workspace.CurrentCamera, "CFrame")
-						local camPos = oldIdx(camCF, "Position")
-						return Ray.new(camPos, (targetPos - camPos).Unit)
+						return Ray.new(camCF.Position, (targetPos - camCF.Position).Unit)
 					elseif key == "X" or key == "Y" then
-						-- Center of screen; combat handlers rarely read these but
-						-- if they do, this is a sane fallback
-						local cam = workspace.CurrentCamera
-						local vp = oldIdx(cam, "ViewportSize")
+						local vp = oldIdx(workspace.CurrentCamera, "ViewportSize")
 						return key == "X" and vp.X * 0.5 or vp.Y * 0.5
 					end
 				end
