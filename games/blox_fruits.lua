@@ -342,28 +342,32 @@ function Module.start(lib)
 	-- 60-stud AOE per swing, server-validated, no hash needed.
 	--
 	-- Pattern adapted from REDz / Ronix / Mukuro hubs.
-	local CombatFW = nil  -- resolved once: { moduleTable, RigLib, rigEvent, validator }
+	local CombatFW = nil          -- resolved: { moduleTable, RigLib, rigEvent, validator }
+	local CombatFWResolveFailed = false  -- cached so we don't re-probe every cycle
 
 	local function resolveCombatFW()
 		if CombatFW then return CombatFW end
-		if typeof(debug) ~= "table" or typeof(debug.getupvalues) ~= "function" then return nil end
+		if CombatFWResolveFailed then return nil end
+		if typeof(debug) ~= "table" or typeof(debug.getupvalues) ~= "function" then
+			CombatFWResolveFailed = true; return nil
+		end
 
 		local playerScripts = LocalPlayer:FindFirstChild("PlayerScripts")
 		local fwModule = playerScripts and playerScripts:FindFirstChild("CombatFramework")
-		if not fwModule then return nil end
+		if not fwModule then CombatFWResolveFailed = true; return nil end
 
 		local ok, ups = pcall(function() return debug.getupvalues(require(fwModule)) end)
-		if not ok or type(ups) ~= "table" or not ups[2] then return nil end
+		if not ok or type(ups) ~= "table" or not ups[2] then CombatFWResolveFailed = true; return nil end
 
 		local rigLibModule = ReplicatedStorage:FindFirstChild("CombatFramework")
 		rigLibModule = rigLibModule and rigLibModule:FindFirstChild("RigLib")
-		if not rigLibModule then return nil end
+		if not rigLibModule then CombatFWResolveFailed = true; return nil end
 		local ok2, RigLib = pcall(require, rigLibModule)
-		if not ok2 or type(RigLib) ~= "table" or typeof(RigLib.getBladeHits) ~= "function" then return nil end
+		if not ok2 or type(RigLib) ~= "table" or typeof(RigLib.getBladeHits) ~= "function" then CombatFWResolveFailed = true; return nil end
 
 		local rigEvent = ReplicatedStorage:FindFirstChild("RigControllerEvent")
 		local validator = Remotes:FindFirstChild("Validator")
-		if not (rigEvent and validator) then return nil end
+		if not (rigEvent and validator) then CombatFWResolveFailed = true; return nil end
 
 		CombatFW = {
 			moduleTable = ups[2],
@@ -1016,7 +1020,16 @@ function Module.start(lib)
 		function() return cfg.autoFarm end,
 		function(v)
 			cfg.autoFarm = v
-			if v then ensureToolEquipped() end
+			if v then
+				ensureToolEquipped()
+				if not getHash() then
+					Toast.show({
+						title = "Swing M1 once to capture",
+						body  = "BF refactored away the CombatFramework path. Hit any mob once with your fist and we'll sniff the session hash from your swing — then it runs untouched.",
+						kind  = "warn", duration = 10,
+					})
+				end
+			end
 		end)
 	ui.intervalRow(farm, "Attack cadence (sec)",
 		function() return cfg.attackCadence end,
@@ -1050,6 +1063,13 @@ function Module.start(lib)
 			if v then
 				cfg.autoFarm = true  -- auto-farm is implied
 				ensureToolEquipped()
+				if not getHash() then
+					Toast.show({
+						title = "Swing M1 once to start",
+						body  = "Sea 1 progression is armed. Hit any mob once so we can sniff the session hash, then the loop drives itself.",
+						kind  = "warn", duration = 10,
+					})
+				end
 			end
 		end)
 
