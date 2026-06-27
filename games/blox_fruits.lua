@@ -349,20 +349,46 @@ function Module.start(lib)
 		bv.Parent = hrp
 		activeTpBV = bv
 
-		-- Steering loop — re-aim each frame in case the player drifts,
-		-- and clean up when we arrive (within 50 studs).
+		-- Steering loop — re-aim each tick in case the player drifts.
+		-- When we arrive (within 80 studs), do NOT destroy the BV — instead
+		-- pin the player at the destination by clamping the BV velocity to
+		-- counter any rollback. Hold for ~2s so the server reconciles the
+		-- new position, then ramp velocity down and clean up.
 		task.spawn(function()
 			local t0 = os.clock()
+			local arrived = false
+			-- Flight phase: re-aim toward dest at full speed
 			while bv.Parent and (os.clock() - t0) < 180 do
 				local d = (hrp.Position - dest).Magnitude
-				if d < 50 then break end
-				-- Re-aim each cycle. Small overshoots get corrected.
+				if d < 80 then arrived = true; break end
 				bv.Velocity = (dest - hrp.Position).Unit * TP_BV_SPEED
-				task.wait(0.15)
+				task.wait(0.1)
 			end
+
+			if arrived and bv.Parent then
+				-- Settle phase: hold player at destination for 2.5s. Each
+				-- tick, push toward dest with declining force so we don't
+				-- ricochet off geometry. This overpowers the server's
+				-- rollback assertion long enough for it to accept the new
+				-- position as authoritative.
+				local settleStart = os.clock()
+				while bv.Parent and os.clock() - settleStart < 2.5 do
+					local offset = dest - hrp.Position
+					local d = offset.Magnitude
+					if d > 0.5 then
+						-- correctional push: stronger the further we drifted,
+						-- but never above 400 (well under the throttle)
+						local pushMag = math.min(400, d * 4)
+						bv.Velocity = offset.Unit * pushMag
+					else
+						bv.Velocity = Vector3.new(0, 0, 0)
+					end
+					task.wait(0.05)
+				end
+			end
+
 			if bv.Parent then bv:Destroy() end
 			if activeTpBV == bv then activeTpBV = nil end
-			-- After arrival, restore the auto-loops
 			task.wait(0.3)
 			cfg.autoFarm = restoreAutoFarm
 			cfg.autoSea1 = restoreAutoSea1
