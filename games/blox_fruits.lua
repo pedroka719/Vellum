@@ -237,7 +237,7 @@ function Module.start(lib)
 		{ name = "Desert",          pos = Vector3.new(944.2, 20.9, 4373.3),    lvlRange = "Lv 60-89"   },
 		{ name = "Frozen Village",  pos = Vector3.new(1347.8, 104.7, -1319.7), lvlRange = "Lv 90-119"  },
 		{ name = "Marine Fortress", pos = Vector3.new(-4914.8, 51.0, 4281.0),  lvlRange = "Lv 120-149" },
-		{ name = "Skylands",        pos = Vector3.new(-483.7, 332.0, 595.3),   lvlRange = "Lv 150-249" },
+		{ name = "Skylands",        pos = Vector3.new(-4607.0, 874.0, -1667.0),lvlRange = "Lv 150-249", portal = "Sky3Exit" },
 		{ name = "Prison",          pos = Vector3.new(4875.3, 5.7, 734.9),     lvlRange = "Lv 250-324" },
 		{ name = "Colosseum",       pos = Vector3.new(-11.3, 29.3, 2771.5),    lvlRange = "PvP"        },
 		{ name = "Magma Village",   pos = Vector3.new(-5247.7, 12.9, 8504.9),  lvlRange = "Lv 325-449" },
