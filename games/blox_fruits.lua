@@ -664,118 +664,13 @@ function Module.start(lib)
 	local function autoFarmLoop()
 		while gui.Parent do
 			if _tpInProgress then jwait(1.0) continue end
-			if cfg.autoFarm then
+			if cfg.autoFarm and getHash() then
 				if not flightConn then startFlight() end
-
-				-- Fire the capture probe the first time autoFarm runs without a
-				-- hash. Not gated on a target — we want F9 diagnostics even when
-				-- pickEnemy returns nil (safe zones, empty workspace.Enemies).
-				if not getHash() and not SPY._captureProbed then
-					SPY._captureProbed = true
-					local hasGC = typeof(getconnections) == "function"
-					local hasFS = typeof(firesignal) == "function"
-					local equipped = ensureToolEquipped()
-					local nTool, nMouse, nUIS = 0, 0, 0
-					if hasGC then
-						if equipped then nTool = #getconnections(equipped.Activated) end
-						local mouse = LocalPlayer:GetMouse()
-						nMouse = #getconnections(mouse.Button1Down)
-						nUIS = #getconnections(UserInputService.InputBegan)
-					end
-					warn(string.format(
-						"[Vellum BF] capture probe: getconnections=%s firesignal=%s tool=%s tool.Activated=%d mouse.Button1Down=%d UIS.InputBegan=%d",
-						tostring(hasGC), tostring(hasFS),
-						equipped and equipped.Name or "<none>",
-						nTool, nMouse, nUIS
-					))
-				end
 
 				safe(function()
 					local enemy = currentTarget
 					if not enemy or not enemy.Parent then
-						-- One-shot diagnostic so F9 tells us *why* there's no target.
-						-- Empty container, missing Level attribute, all dead, etc.
-						if not SPY._noTargetWarned then
-							SPY._noTargetWarned = true
-							local enemies = workspace:FindFirstChild("Enemies")
-							if not enemies then
-								warn("[Vellum BF] no target — workspace.Enemies doesn't exist. BF may use a different container.")
-							else
-								local kids = enemies:GetChildren()
-								local sample = {}
-								local hrpSelf = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-								for i = 1, math.min(5, #kids) do
-									local e = kids[i]
-									local lvl = e:GetAttribute("Level")
-									local hum = e:FindFirstChild("Humanoid")
-									local hp  = hum and hum.Health or "?"
-									local hrp = e:FindFirstChild("HumanoidRootPart")
-									local dist = "?"
-									if hrp and hrpSelf then
-										dist = string.format("%.0f", (hrp.Position - hrpSelf.Position).Magnitude)
-									end
-									table.insert(sample, string.format("%s[Lv=%s HP=%s d=%s]", e.Name, tostring(lvl), tostring(hp), dist))
-								end
-								warn(string.format(
-									"[Vellum BF] no target — workspace.Enemies has %d entries (filters: name='%s' lvl=%d..%d). First %d: %s",
-									#kids,
-									cfg.farmTargetName, cfg.farmLevelMin, cfg.farmLevelMax,
-									#sample, #sample > 0 and table.concat(sample, ", ") or "(none)"
-								))
-							end
-						end
 						jwait(0.3); return
-					end
-					SPY._noTargetWarned = false  -- reset once we acquire something
-
-					-- No hash yet? Fire combat listeners directly. The flight loop
-					-- already hovers us above the target so Mouse.Hit points there.
-					if not getHash() then
-						ensureToolEquipped()
-						local cam = workspace.CurrentCamera
-						local ehrp = enemy:FindFirstChild("HumanoidRootPart")
-						if cam and ehrp then
-							cam.CFrame = CFrame.lookAt(cam.CFrame.Position, ehrp.Position)
-							RunService.Heartbeat:Wait()
-						end
-
-						-- VirtualUser:Button1Down goes through UserInputService and
-						-- never reaches BF combat listeners (Tool.Activated +
-						-- LocalPlayer.Mouse.Button1Down). Use the executor exports
-						-- getconnections / firesignal to fire those signals straight
-						-- at every registered listener.
-						local triggered = false
-						local ch = LocalPlayer.Character
-
-						-- firesignal crosses Lua-state boundaries; getconnections+Fire
-						-- doesn't (Volt blocks it as "foreign state" and floods the
-						-- console with warnings). Use firesignal when available.
-						local fs = firesignal
-						if typeof(fs) == "function" then
-							local tool = ch and ch:FindFirstChildOfClass("Tool")
-							if tool then
-								if pcall(fs, tool.Activated) then triggered = true end
-							end
-							if pcall(fs, LocalPlayer:GetMouse().Button1Down) then triggered = true end
-							local fakeInput = {
-								UserInputType  = Enum.UserInputType.MouseButton1,
-								UserInputState = Enum.UserInputState.Begin,
-								KeyCode        = Enum.KeyCode.Unknown,
-								Position       = Vector3.new(0, 0, 0),
-							}
-							if pcall(fs, UserInputService.InputBegan, fakeInput, false) then
-								triggered = true
-							end
-						end
-
-						if not triggered and cam then
-							safe(function() VirtualUser:Button1Down(Vector2.new(0, 0), cam.CFrame) end)
-							task.wait(0.05)
-							safe(function() VirtualUser:Button1Up(Vector2.new(0, 0), cam.CFrame) end)
-						end
-
-						jwait(0.4)
-						return
 					end
 
 					-- Attack until target dies. Flight loop keeps repositioning
@@ -784,14 +679,12 @@ function Module.start(lib)
 					while enemy.Parent and cfg.autoFarm and getHash() and guard < 200 do
 						attackOnce(enemy)
 						guard = guard + 1
-						-- ±20% jitter — fixed-period swings are a fingerprint, even
-						-- if the absolute rate is "safe."
+						-- +/-20% jitter so fixed-period swings stop being a fingerprint.
 						jwait(cfg.attackCadence * (0.8 + math.random() * 0.4))
 					end
 
 					if enemy and not enemy.Parent then
 						stats.sessionKills = stats.sessionKills + 1
-						-- Reset target memory so flight picks the next enemy
 						currentTarget = nil
 						targetOriginalY = nil
 					end
@@ -874,10 +767,11 @@ function Module.start(lib)
 		function(v)
 			cfg.autoFarm = v
 			if v and not getHash() then
+				ensureToolEquipped()
 				Toast.show({
-					title = "Capturing session hash",
-					body  = "Flying to a target and swinging — should land within a few seconds.",
-					kind  = "info", duration = 5,
+					title = "Swing M1 once to capture",
+					body  = "Equipped your tool. Hit any mob once and we'll sniff the session hash from your swing.",
+					kind  = "warn", duration = 8,
 				})
 			end
 		end)
@@ -911,7 +805,15 @@ function Module.start(lib)
 		function(v)
 			cfg.autoSea1 = v
 			if v then
-				cfg.autoFarm = true  -- auto-farm is implied; loop handles hash capture
+				cfg.autoFarm = true  -- auto-farm is implied
+				if not getHash() then
+					ensureToolEquipped()
+					Toast.show({
+						title = "Swing M1 once to capture",
+						body  = "Sea 1 progression is armed. Hit any mob once so we can sniff your session hash, then it'll run on its own.",
+						kind  = "warn", duration = 8,
+					})
+				end
 			end
 		end)
 
