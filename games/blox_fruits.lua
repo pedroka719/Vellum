@@ -401,7 +401,11 @@ function Module.start(lib)
 		stopFlight()
 
 		local isSkyIsland = island.pos.Y > 500
-		local dest = findClearLanding(island.pos, isSkyIsland)
+		local ok, dest = pcall(findClearLanding, island.pos, isSkyIsland)
+		if not ok then
+			warn("[Vellum BF] findClearLanding error:", dest)
+			dest = Vector3.new(island.pos.X, island.pos.Y + 6, island.pos.Z)
+		end
 
 		if (dest - hrp.Position).Magnitude < 3 then
 			cfg.autoFarm = restoreAutoFarm
