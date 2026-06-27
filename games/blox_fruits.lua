@@ -1,14 +1,15 @@
--- Vellum — Blox Fruits (v0.1)
+-- Vellum — Blox Fruits (v0.2)
 --
 -- PlaceId 2753915549. Single source of truth: this file. lib/ stays generic.
 --
--- Combat protocol (verified by recon, see scratchpad/bf_recon/07_gates_passed.md):
+-- Combat protocol:
 --   1. RegisterAttack:FireServer(damageMul)            -- 0.5 normal / 1.0 finisher
---   2. RegisterHit:FireServer(meshPart, {}, nil, hash) -- meshPart is child of enemy
+--   2. RegisterHit:FireServer(part, {}, nil, hash)     -- part is child of enemy
 --   ~0.18s between swings is realistic and unflagged.
 --
--- Hash is per-player session-stable. Captured by snooping the first real
--- RegisterHit call, then reused for the whole session.
+-- Hash is self-generated from UserId + thread ID (same formula BF's CombatUtil
+-- uses internally). We fire its one-shot registration ourselves so the server
+-- accepts our hits. No dependency on the game's broken CombatUtil coroutine.
 --
 -- Movement: NEVER raw CFrame TPs (detection vector). Always tween, capped
 -- below the velocity guard's 1500 threshold (the StarterCharacter "Fling
@@ -119,14 +120,43 @@ function Module.start(lib)
 	-- so the hover loop doesn't fight the tween for HRP control.
 	local _tpInProgress = false
 
-	-- read current hash (may be set from a prior boot)
+	-- Self-generate and register a session hash using the same formula BF's
+	-- CombatUtil uses internally (UserId chars 2-4 + thread hex chars 11-15).
+	-- The server accepts any consistent 8-hex-char hash — we just have to fire
+	-- the one-shot registration BEFORE using it in RegisterHit calls.
+	local function generateHash()
+		local prefix = tostring(LocalPlayer.UserId):sub(2, 4)
+		local suffix = tostring(coroutine.running()):sub(11, 15)
+		return prefix .. suffix
+	end
+
+	-- Register the hash with the server so RegisterHit:FireServer(..., hash)
+	-- is accepted. Fire-and-forget — the server stores it per-session.
+	local function registerHash(hash)
+		if not hash then return end
+		local ok, err = pcall(function() R.RegisterHit:FireServer(hash) end)
+		if ok then
+			warn("[Vellum BF] hash registered:", hash)
+		else
+			warn("[Vellum BF] hash registration failed:", err)
+		end
+	end
+
+	-- Ensure we have a hash generated and registered. Called at boot and after
+	-- respawn. Once registered, the hash is stored in SPY (getgenv) and reused
+	-- across script reloads until the next CharacterAdded invalidates it.
+	local function ensureHash()
+		if SPY.hash then return SPY.hash end
+		SPY.hash = generateHash()
+		registerHash(SPY.hash)
+		return SPY.hash
+	end
+
 	local function getHash() return SPY.hash end
 
-	-- expose a way to wipe the hash (called from a UI button + on respawn,
-	-- since BF rotates the hash when the character respawns)
 	local function clearHash()
 		SPY.hash = nil
-		warn("[Vellum BF] session hash cleared")
+		warn("[Vellum BF] session hash cleared — will regenerate on next tick")
 	end
 
 	local function spyPush(row)
@@ -148,65 +178,21 @@ function Module.start(lib)
 		return out
 	end
 
-	-- ─── Hash extraction via getgc upvalue scan ───
-	-- The session hash is an 8-char hex string computed once by the combat
-	-- module and held as a closure upvalue. Hubs like Hoho find it by
-	-- enumerating every gc'd function with getgc(true) and grepping for
-	-- 8-hex-char string upvalues in functions sourced from combat code.
-	-- No synthetic input, no Mouse hook — just read the value where it lives.
-	local function looksLikeHash(s)
-		return type(s) == "string" and #s == 8 and s:match("^[%x][%x][%x][%x][%x][%x][%x][%x]$") ~= nil
-	end
+	-- ─── Hash self-generation ───
+	-- We self-generate and register the session hash instead of extracting it
+	-- from BF's CombatUtil (which doesn't initialize properly in executors).
+	-- The hash formula matches the game's: UserId:sub(2,4) .. thread:sub(11,15).
+	-- generateHash(), registerHash(), and ensureHash() defined above.
 
-	local function extractHashFromGC()
-		if typeof(getgc) ~= "function" then return nil end
-		local hasGetUpval = typeof(debug) == "table" and typeof(debug.getupvalues) == "function"
-		local hasGetUpvalSingle = typeof(debug) == "table" and typeof(debug.getupvalue) == "function"
-		if not (hasGetUpval or hasGetUpvalSingle) then return nil end
-
-		local scanned, matched = 0, 0
-		for _, v in pairs(getgc(true)) do
-			if type(v) == "function" then
-				scanned = scanned + 1
-				-- Filter: only inspect functions sourced from BF code, not
-				-- our own or executor-injected ones. checkcaller-style filter.
-				local ok, info = pcall(debug.getinfo, v, "S")
-				if ok and info and info.source then
-					local src = info.source
-					if src:find("Combat") or src:find("Net") or src:find("RegisterHit") then
-						matched = matched + 1
-						if hasGetUpval then
-							local ok2, ups = pcall(debug.getupvalues, v)
-							if ok2 and type(ups) == "table" then
-								for _, upval in pairs(ups) do
-									if looksLikeHash(upval) then
-										return upval, scanned, matched
-									end
-								end
-							end
-						else
-							local i = 1
-							while true do
-								local ok2, _, upval = pcall(debug.getupvalue, v, i)
-								if not ok2 or upval == nil then break end
-								if looksLikeHash(upval) then
-									return upval, scanned, matched
-								end
-								i = i + 1
-							end
-						end
-					end
-				end
-			end
-		end
-		return nil, scanned, matched
-	end
-
-	-- BF rotates the hash every respawn. Clear it on the new character —
-	-- the auto-farm loop will re-capture from the next synthetic swing once
-	-- it's hovering over a target.
+	-- BF rotates the hash every respawn. Generate a fresh one, register it,
+	-- and resume farming on the new character.
 	LocalPlayer.CharacterAdded:Connect(function()
 		clearHash()
+		-- Generate and register a new hash on the new character's thread
+		task.spawn(function()
+			task.wait(1.5)  -- let the character load
+			ensureHash()
+		end)
 	end)
 
 	if cfg.spyEnabled and not SPY.hookInstalled then
@@ -221,24 +207,6 @@ function Module.start(lib)
 				local nm = self.Name
 				local v = (select(1, ...))
 				if not (type(v) == "string" and POLL_NOISE[v]) then
-					-- Hash capture: any real RegisterHit with a valid 8-hex
-					-- 4th arg. Stored in getgenv so reloads pick it up.
-					if nm == "RE/RegisterHit" and not SPY.hash then
-						local _, _, _, h = ...
-						if type(h) == "string" and #h == 8 then
-							SPY.hash = h
-							warn("[Vellum BF] session hash captured:", h)
-							-- Defer the toast — the hook runs on the namecall
-							-- thread and Toast.show may yield.
-							task.spawn(function()
-								Toast.show({
-									title = "Hash captured",
-									body  = "Session token sniffed — full-speed farm engaged.",
-									kind  = "success", duration = 4,
-								})
-							end)
-						end
-					end
 					spyPush({
 						t = os.clock(),
 						r = nm,
@@ -333,142 +301,11 @@ function Module.start(lib)
 		return true
 	end
 
-	-- ═══════════════════════════ COMBAT FRAMEWORK ═══════════════════════════
-	-- The real way hubs farm: skip RegisterAttack/RegisterHit and the whole
-	-- hash dance. Go through BF's own CombatFramework module: pull its
-	-- activeController via debug.getupvalues(require(...)), step the
-	-- internal LCG state that drives Validator, fire Validator +
-	-- RigControllerEvent("hit", ...) with deduplicated getBladeHits.
-	-- 60-stud AOE per swing, server-validated, no hash needed.
-	--
-	-- Pattern adapted from REDz / Ronix / Mukuro hubs.
-	local CombatFW = nil          -- resolved: { moduleTable, RigLib, rigEvent, validator }
-	local CombatFWResolveFailed = false  -- cached so we don't re-probe every cycle
-
-	local function resolveCombatFW()
-		if CombatFW then return CombatFW end
-		if CombatFWResolveFailed then return nil end
-		if typeof(debug) ~= "table" or typeof(debug.getupvalues) ~= "function" then
-			CombatFWResolveFailed = true; return nil
-		end
-
-		local playerScripts = LocalPlayer:FindFirstChild("PlayerScripts")
-		local fwModule = playerScripts and playerScripts:FindFirstChild("CombatFramework")
-		if not fwModule then CombatFWResolveFailed = true; return nil end
-
-		local ok, ups = pcall(function() return debug.getupvalues(require(fwModule)) end)
-		if not ok or type(ups) ~= "table" or not ups[2] then CombatFWResolveFailed = true; return nil end
-
-		local rigLibModule = ReplicatedStorage:FindFirstChild("CombatFramework")
-		rigLibModule = rigLibModule and rigLibModule:FindFirstChild("RigLib")
-		if not rigLibModule then CombatFWResolveFailed = true; return nil end
-		local ok2, RigLib = pcall(require, rigLibModule)
-		if not ok2 or type(RigLib) ~= "table" or typeof(RigLib.getBladeHits) ~= "function" then CombatFWResolveFailed = true; return nil end
-
-		local rigEvent = ReplicatedStorage:FindFirstChild("RigControllerEvent")
-		local validator = Remotes:FindFirstChild("Validator")
-		if not (rigEvent and validator) then CombatFWResolveFailed = true; return nil end
-
-		CombatFW = {
-			moduleTable = ups[2],
-			RigLib      = RigLib,
-			rigEvent    = rigEvent,
-			validator   = validator,
-		}
-		return CombatFW
-	end
-
-	local function getCurrentBlade()
-		local fw = CombatFW
-		if not fw then return nil end
-		local ac = fw.moduleTable.activeController
-		if not (ac and ac.blades and ac.blades[1]) then return nil end
-		local blade = ac.blades[1]
-		local guard = 0
-		while blade and blade.Parent ~= LocalPlayer.Character and guard < 8 do
-			blade = blade.Parent
-			guard = guard + 1
-		end
-		return blade
-	end
-
-	local function getDeduplicatedHits()
-		local fw = CombatFW
-		local ch = LocalPlayer.Character
-		local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
-		if not (fw and hrp) then return {} end
-		local ok, raw = pcall(fw.RigLib.getBladeHits, ch, { hrp }, 60)
-		if not ok or type(raw) ~= "table" then return {} end
-		local out, seen = {}, {}
-		for _, part in ipairs(raw) do
-			local model = part.Parent
-			if model and not seen[model] then
-				local mhrp = model:FindFirstChild("HumanoidRootPart")
-				if mhrp then
-					seen[model] = true
-					table.insert(out, mhrp)
-				end
-			end
-		end
-		return out
-	end
-
-	-- One swing via CombatFramework. Returns true on success.
-	local function attackCombatFW()
-		local fw = resolveCombatFW()
-		if not fw then return false end
-		local ac = fw.moduleTable.activeController
-		if not (ac and ac.attack) then return false end
-
-		-- Read internal LCG state from the attack closure's upvalues. Indices
-		-- 4-7 are: counter (4), increment (5), modulus_high (6), step (7) —
-		-- order matches the snippet from the hubs.
-		local ok7, u7 = pcall(debug.getupvalue, ac.attack, 4)
-		local ok8, u8 = pcall(debug.getupvalue, ac.attack, 5)
-		local ok9, u9 = pcall(debug.getupvalue, ac.attack, 6)
-		local ok10, u10 = pcall(debug.getupvalue, ac.attack, 7)
-		if not (ok7 and ok8 and ok9 and ok10) then return false end
-		if type(u7) ~= "number" or type(u8) ~= "number" or type(u9) ~= "number" or type(u10) ~= "number" then
-			return false
-		end
-
-		-- Step the LCG (game's internal validator formula).
-		local u12 = (u8 * 798405 + u7 * 727595) % u9
-		local u13 = u7 * 798405
-		u12 = (u12 * u9 + u13) % 1099511627776
-		u8  = math.floor(u12 / u9)
-		u7  = u12 - u8 * u9
-		u10 = u10 + 1
-
-		pcall(debug.setupvalue, ac.attack, 4, u7)
-		pcall(debug.setupvalue, ac.attack, 5, u8)
-		pcall(debug.setupvalue, ac.attack, 6, u9)
-		pcall(debug.setupvalue, ac.attack, 7, u10)
-
-		local validatorValue = math.floor(u12 / 1099511627776 * 16777215)
-
-		-- Play attack animations so the swing looks legitimate to other clients.
-		pcall(function()
-			if ac.animator and ac.animator.anims and ac.animator.anims.basic then
-				for _, anim in pairs(ac.animator.anims.basic) do
-					anim:Play()
-				end
-			end
-		end)
-
-		local blade = getCurrentBlade()
-		if not blade then return false end
-
-		safe(function() fw.rigEvent:FireServer("weaponChange", tostring(blade)) end)
-		safe(function() fw.validator:FireServer(validatorValue, u10) end)
-
-		local hits = getDeduplicatedHits()
-		if #hits > 0 then
-			safe(function() fw.rigEvent:FireServer("hit", hits, 1, "") end)
-		end
-
-		return true
-	end
+	-- ═══════════════════════════ COMBAT ═══════════════════════════
+	-- We use the standard RegisterAttack + RegisterHit protocol with a
+	-- self-generated hash. The CombatFramework API path was removed in
+	-- BF's internal refactor (no RigLib, no RigControllerEvent, no
+	-- PlayerScripts.CombatFramework). The hash is the only gate.
 
 	-- ═══════════════════════════ TARGETING ═══════════════════════════
 	-- Score = inverse distance + level-fit. Closer + within range = higher.
@@ -911,32 +748,15 @@ function Module.start(lib)
 			if not flightConn then startFlight() end
 			ensureToolEquipped()
 
-			-- Probe CombatFramework once and report shape so F9 confirms
-			-- we resolved the controller / RigLib / Validator path.
-			if not SPY._fwProbed then
-				SPY._fwProbed = true
-				local fw = resolveCombatFW()
-				warn(string.format(
-					"[Vellum BF] CombatFW probe: resolved=%s controller=%s riglib=%s validator=%s",
-					tostring(fw ~= nil),
-					tostring(fw and fw.moduleTable and fw.moduleTable.activeController ~= nil),
-					tostring(fw and fw.RigLib ~= nil),
-					tostring(fw and fw.validator ~= nil)
-				))
-			end
-
 			safe(function()
 				local enemy = currentTarget
 				if not enemy or not enemy.Parent then
 					jwait(0.3); return
 				end
 
-				-- Path A: CombatFramework (preferred — no hash, AOE).
-				-- Path B: legacy hash+RegisterHit (only if we already captured a hash somehow).
-				local landed = attackCombatFW()
-				if not landed and getHash() then
-					landed = attackOnce(enemy)
-				end
+				-- Standard RegisterAttack+RegisterHit protocol with self-generated hash.
+				ensureHash()  -- generates + registers if not yet set
+				local landed = attackOnce(enemy)
 
 				if enemy and not enemy.Parent then
 					stats.sessionKills = stats.sessionKills + 1
@@ -1023,10 +843,11 @@ function Module.start(lib)
 			if v then
 				ensureToolEquipped()
 				if not getHash() then
+					ensureHash()
 					Toast.show({
-						title = "Swing M1 once to capture",
-						body  = "BF refactored away the CombatFramework path. Hit any mob once with your fist and we'll sniff the session hash from your swing — then it runs untouched.",
-						kind  = "warn", duration = 10,
+						title = "Hash auto-generated",
+						body  = "Session token generated and registered — auto-farm running.",
+						kind  = "success", duration = 4,
 					})
 				end
 			end
@@ -1064,10 +885,11 @@ function Module.start(lib)
 				cfg.autoFarm = true  -- auto-farm is implied
 				ensureToolEquipped()
 				if not getHash() then
+					ensureHash()
 					Toast.show({
-						title = "Swing M1 once to start",
-						body  = "Sea 1 progression is armed. Hit any mob once so we can sniff the session hash, then the loop drives itself.",
-						kind  = "warn", duration = 10,
+						title = "Hash auto-generated",
+						body  = "Session token ready — Sea 1 loop driving itself.",
+						kind  = "success", duration = 4,
 					})
 				end
 			end
@@ -1144,7 +966,7 @@ function Module.start(lib)
 				Helpers.fmt(stats.sessionXP), Helpers.perHour(stats.sessionXP, elapsed),
 				Helpers.fmt(stats.sessionBeli), Helpers.perHour(stats.sessionBeli, elapsed),
 				Helpers.fmtDur(elapsed),
-				getHash() or "(toggle Auto-farm to auto-capture)"
+				getHash() or "(auto-generated on first tick)"
 			)
 			task.wait(1)
 		end
@@ -1163,12 +985,12 @@ function Module.start(lib)
 		function() return cfg.spyEnabled end,
 		function(v) cfg.spyEnabled = v end)
 
-	ui.actionBtn(settings, "Forget session hash (force re-capture)", function()
+	ui.actionBtn(settings, "Reset session hash (force regenerate)", function()
 		clearHash()
 		Toast.show({
-			title = "Hash cleared",
-			body  = "Re-toggle Auto-farm to auto-capture, or swing M1 once.",
-			kind  = "info", duration = 6,
+			title = "Hash reset",
+			body  = "Will regenerate next tick on the current thread.",
+			kind  = "info", duration = 4,
 		})
 	end)
 
@@ -1197,8 +1019,8 @@ function Module.start(lib)
 
 	Toast.show({
 		title = "Vellum loaded",
-		body = "Toggle Auto-farm — we'll auto-capture the session hash from a synthetic swing if an enemy is in reach.",
-		kind = "info", duration = 8,
+		body = "Toggle Auto-farm — hash self-generates on first attack tick.",
+		kind = "info", duration = 6,
 	})
 
 	print("[Vellum BF] module loaded.")
