@@ -198,6 +198,40 @@ function Module.start(lib)
 		SPY.hookInstalled = true
 	end
 
+	-- ─── Mouse.Hit / Mouse.Target substitution hook ───
+	-- Persistent __index hook on game. When SPY._captureMode is on, any read
+	-- of Mouse.Hit or Mouse.Target returns SPY._captureTarget.CFrame / the
+	-- part itself, instead of whatever the user's real cursor is pointing at.
+	--
+	-- This is what lets a synthetic firesignal(Tool.Activated) actually land
+	-- a hit — BF's combat handler reads Mouse.Hit at click time; without the
+	-- hook it sees the user's actual cursor position (sky, ground, nothing),
+	-- bails, and never fires RegisterHit. With the hook it sees the enemy
+	-- HRP we chose, fires RegisterHit normally, and our __namecall spy above
+	-- catches the hash from that call.
+	--
+	-- Critical safety: NEVER access self.Anything inside the hook — that
+	-- would re-trigger __index and infinite-recurse. Use oldIdx(self, key)
+	-- for any property read we need, and :IsA which goes through __namecall
+	-- (a different metamethod) so it doesn't loop.
+	if cfg.spyEnabled and not SPY.mouseHookInstalled then
+		local oldIdx
+		oldIdx = hookmetamethod(game, "__index", function(self, key)
+			if SPY._captureMode and SPY._captureTarget then
+				if (key == "Hit" or key == "Target") and typeof(self) == "Instance" and self:IsA("Mouse") then
+					local target = SPY._captureTarget
+					if key == "Hit" then
+						return oldIdx(target, "CFrame")
+					else
+						return target
+					end
+				end
+			end
+			return oldIdx(self, key)
+		end)
+		SPY.mouseHookInstalled = true
+	end
+
 	-- Punishment detection — if BF kicks us, surface the spy buffer.
 	game:GetService("LogService").MessageOut:Connect(function(msg, mtype)
 		if mtype ~= Enum.MessageType.MessageError then return end
@@ -664,7 +698,7 @@ function Module.start(lib)
 	local function autoFarmLoop()
 		while gui.Parent do
 			if _tpInProgress then jwait(1.0) continue end
-			if cfg.autoFarm and getHash() then
+			if cfg.autoFarm then
 				if not flightConn then startFlight() end
 
 				safe(function()
@@ -673,8 +707,28 @@ function Module.start(lib)
 						jwait(0.3); return
 					end
 
-					-- Attack until target dies. Flight loop keeps repositioning
-					-- and switching targets independently.
+					-- No hash yet? Fire Tool.Activated with the mouse hook
+					-- substituting Mouse.Hit/Target → enemy.HRP. BF's combat
+					-- handler runs, reads our substituted target, fires
+					-- RegisterHit normally, the namecall spy catches the hash.
+					if not getHash() then
+						local ehrp = enemy:FindFirstChild("HumanoidRootPart")
+						if ehrp then
+							ensureToolEquipped()
+							local tool = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Tool")
+							if tool and typeof(firesignal) == "function" then
+								SPY._captureTarget = ehrp
+								SPY._captureMode = true
+								pcall(firesignal, tool.Activated)
+								task.wait(0.1)
+								SPY._captureMode = false
+							end
+						end
+						jwait(0.4)
+						return
+					end
+
+					-- Hash captured — normal attack flow.
 					local guard = 0
 					while enemy.Parent and cfg.autoFarm and getHash() and guard < 200 do
 						attackOnce(enemy)
@@ -769,9 +823,9 @@ function Module.start(lib)
 			if v and not getHash() then
 				ensureToolEquipped()
 				Toast.show({
-					title = "Swing M1 once to capture",
-					body  = "Equipped your tool. Hit any mob once and we'll sniff the session hash from your swing.",
-					kind  = "warn", duration = 8,
+					title = "Capturing session hash",
+					body  = "Flying you above a target and triggering a synthetic swing with mouse-hit redirect — should land in a few seconds.",
+					kind  = "info", duration = 5,
 				})
 			end
 		end)
@@ -809,9 +863,9 @@ function Module.start(lib)
 				if not getHash() then
 					ensureToolEquipped()
 					Toast.show({
-						title = "Swing M1 once to capture",
-						body  = "Sea 1 progression is armed. Hit any mob once so we can sniff your session hash, then it'll run on its own.",
-						kind  = "warn", duration = 8,
+						title = "Capturing session hash",
+						body  = "Sea 1 progression armed. Synthetic swing fires once we hover above a mob — hash should land within seconds.",
+						kind  = "info", duration = 5,
 					})
 				end
 			end
