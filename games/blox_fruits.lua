@@ -105,7 +105,14 @@ function Module.start(lib)
 	-- getgenv().VellumBF.hash, where every future BF module boot reads from.
 	getgenv().VellumBF = getgenv().VellumBF or {}
 	local SPY = getgenv().VellumBF
-	SPY.log = SPY.log or {}
+	-- Ring buffer. O(1) push, no per-insert shift. If a prior boot left a
+	-- different-shaped log behind, re-initialize.
+	if type(SPY.log) ~= "table" or SPY.cap ~= cfg.spyBufferSize then
+		SPY.log   = table.create(cfg.spyBufferSize)
+		SPY.cap   = cfg.spyBufferSize
+		SPY.head  = 1   -- next write slot
+		SPY.count = 0   -- entries actually written, capped at cap
+	end
 	SPY.frozen = false
 
 	-- Teleport-in-progress guard. Pauses autoFarm + flight while a TP runs
@@ -119,14 +126,93 @@ function Module.start(lib)
 	-- since BF rotates the hash when the character respawns)
 	local function clearHash()
 		SPY.hash = nil
-		warn("[Vellum BF] session hash cleared — swing M1 to re-capture")
+		warn("[Vellum BF] session hash cleared")
 	end
 
 	local function spyPush(row)
 		if SPY.frozen then return end
-		table.insert(SPY.log, row)
-		while #SPY.log > cfg.spyBufferSize do table.remove(SPY.log, 1) end
+		SPY.log[SPY.head] = row
+		SPY.head = (SPY.head % SPY.cap) + 1
+		if SPY.count < SPY.cap then SPY.count = SPY.count + 1 end
 	end
+
+	-- Newest N entries in chronological order (oldest of the N → newest).
+	-- Used by the spy-dump UI button. n defaults to SPY.count.
+	local function spyTail(n)
+		n = math.min(n or SPY.count, SPY.count)
+		local out = table.create(n)
+		for i = 1, n do
+			local idx = ((SPY.head - (n - i) - 2) % SPY.cap) + 1
+			out[i] = SPY.log[idx]
+		end
+		return out
+	end
+
+	-- ─── Hash auto-capture ───
+	-- Fire a synthetic M1 via VirtualUser. The game's own combat module
+	-- handles the click, calls RegisterHit with a fresh hash, our hook above
+	-- catches it. No user swing needed.
+	--
+	-- Requires a live enemy within ~500 studs (we don't want to yank the
+	-- player across the map for this). If none is in reach, return false and
+	-- the toggle falls back to a "swing M1" toast.
+	local function _findNearbyEnemy()
+		local ch = LocalPlayer.Character
+		local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+		local enemies = workspace:FindFirstChild("Enemies")
+		if not hrp or not enemies then return nil end
+		local best, bestDist
+		for _, e in ipairs(enemies:GetChildren()) do
+			local ehrp = e:FindFirstChild("HumanoidRootPart")
+			local hum = e:FindFirstChild("Humanoid")
+			if ehrp and hum and hum.Health > 0 then
+				local d = (ehrp.Position - hrp.Position).Magnitude
+				if d < 500 and (not bestDist or d < bestDist) then
+					best, bestDist = e, d
+				end
+			end
+		end
+		return best
+	end
+
+	local function tryAutoCaptureHash()
+		if getHash() then return true end
+		local ch = LocalPlayer.Character
+		local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+		if not hrp then return false end
+
+		local enemy = _findNearbyEnemy()
+		if not enemy then return false end
+		local ehrp = enemy:FindFirstChild("HumanoidRootPart")
+		if not ehrp then return false end
+
+		-- Step in close (short CFrame write — well under the 10K rollback floor).
+		hrp.CFrame = ehrp.CFrame * CFrame.new(0, 5, 6)
+		task.wait(0.2)
+
+		-- Point the camera at the enemy so Mouse.Hit lands on the model.
+		local cam = workspace.CurrentCamera
+		cam.CFrame = CFrame.lookAt(hrp.Position, ehrp.Position)
+		task.wait()
+
+		-- Synthetic M1. Two attempts — first one sometimes misses the part.
+		for _ = 1, 2 do
+			safe(function() VirtualUser:Button1Down(Vector2.new(0, 0), cam.CFrame) end)
+			task.wait(0.1)
+			safe(function() VirtualUser:Button1Up(Vector2.new(0, 0), cam.CFrame) end)
+			task.wait(0.4)
+			if getHash() then return true end
+		end
+		return false
+	end
+
+	-- BF rotates the hash every respawn. Clear on death, re-capture on the
+	-- new character (with a short delay to let the tool reattach).
+	LocalPlayer.CharacterAdded:Connect(function()
+		clearHash()
+		task.wait(2)
+		safe(tryAutoCaptureHash)
+	end)
 
 	if cfg.spyEnabled and not SPY.hookInstalled then
 		local POLL_NOISE = {
@@ -168,7 +254,7 @@ function Module.start(lib)
 		if msg:lower():find("kick") or msg:lower():find("ban") or msg:lower():find("disconnect") then
 			SPY.frozen = true
 			warn("[Vellum BF] PUNISHMENT DETECTED — spy buffer frozen with " ..
-				tostring(#SPY.log) .. " entries. Inspect getgenv().VellumBF.log")
+				tostring(SPY.count) .. " entries. Inspect getgenv().VellumBF.log")
 		end
 	end)
 
@@ -610,7 +696,9 @@ function Module.start(lib)
 					while enemy.Parent and cfg.autoFarm and guard < 200 do
 						attackOnce(enemy)
 						guard = guard + 1
-						jwait(cfg.attackCadence)
+						-- ±20% jitter — fixed-period swings are a fingerprint, even
+					-- if the absolute rate is "safe."
+					jwait(cfg.attackCadence * (0.8 + math.random() * 0.4))
 					end
 
 					if enemy and not enemy.Parent then
@@ -691,11 +779,21 @@ function Module.start(lib)
 		function(v)
 			cfg.autoFarm = v
 			if v and not getHash() then
-				Toast.show({
-					title = "Hash not captured yet",
-					body = "Take one M1 swing on any enemy so we can sniff the session hash, then re-enable.",
-					kind = "warn", duration = 8,
-				})
+				task.spawn(function()
+					if tryAutoCaptureHash() then
+						Toast.show({
+							title = "Hash captured",
+							body  = "Auto-sniffed from a synthetic swing. Farming.",
+							kind  = "success", duration = 4,
+						})
+					else
+						Toast.show({
+							title = "Hash not captured yet",
+							body  = "No enemy within reach for the auto-sniff. Move near one and toggle again, or swing M1 once.",
+							kind  = "warn", duration = 8,
+						})
+					end
+				end)
 			end
 		end)
 	ui.intervalRow(farm, "Attack cadence (sec)",
@@ -729,11 +827,15 @@ function Module.start(lib)
 			cfg.autoSea1 = v
 			if v then
 				if not getHash() then
-					Toast.show({
-						title = "Hash not captured",
-						body  = "M1 once on any enemy first, then re-enable.",
-						kind = "warn", duration = 8,
-					})
+					task.spawn(function()
+						if not tryAutoCaptureHash() then
+							Toast.show({
+								title = "Hash not captured",
+								body  = "No enemy within reach for the auto-sniff. Move near one and toggle again, or swing M1 once.",
+								kind  = "warn", duration = 8,
+							})
+						end
+					end)
 				end
 				cfg.autoFarm = true  -- auto-farm is implied
 			end
@@ -810,7 +912,7 @@ function Module.start(lib)
 				Helpers.fmt(stats.sessionXP), Helpers.perHour(stats.sessionXP, elapsed),
 				Helpers.fmt(stats.sessionBeli), Helpers.perHour(stats.sessionBeli, elapsed),
 				Helpers.fmtDur(elapsed),
-				getHash() or "(swing M1 once to capture)"
+				getHash() or "(toggle Auto-farm to auto-capture)"
 			)
 			task.wait(1)
 		end
@@ -833,15 +935,14 @@ function Module.start(lib)
 		clearHash()
 		Toast.show({
 			title = "Hash cleared",
-			body = "Swing M1 once on any enemy to capture a fresh hash.",
-			kind = "info", duration = 6,
+			body  = "Re-toggle Auto-farm to auto-capture, or swing M1 once.",
+			kind  = "info", duration = 6,
 		})
 	end)
 
 	ui.actionBtn(settings, "Dump spy buffer to console", function()
-		print("=== Vellum BF spy buffer (" .. #SPY.log .. " entries) ===")
-		for i = math.max(1, #SPY.log - 60), #SPY.log do
-			local r = SPY.log[i]
+		print("=== Vellum BF spy buffer (" .. SPY.count .. " entries) ===")
+		for _, r in ipairs(spyTail(60)) do
 			print(string.format("[%.2f] %s %s %s", r.t, r.r, r.m, r.v))
 		end
 	end)
@@ -864,7 +965,7 @@ function Module.start(lib)
 
 	Toast.show({
 		title = "Vellum loaded",
-		body = "Swing M1 once on any enemy to capture your session hash, then toggle Auto-farm.",
+		body = "Toggle Auto-farm — we'll auto-capture the session hash from a synthetic swing if an enemy is in reach.",
 		kind = "info", duration = 8,
 	})
 
