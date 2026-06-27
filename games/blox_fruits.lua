@@ -751,7 +751,30 @@ function Module.start(lib)
 			safe(function()
 				local enemy = currentTarget
 				if not enemy or not enemy.Parent then
-					jwait(0.3); return
+					-- Actively pick the next target and tween to it.
+					-- Without this, we'd jwait 0.3s doing nothing and rely on
+					-- BodyPosition physics to slowly drag us — which BF's
+					-- anticheat often removes, locking us in place.
+					local newEnemy = pickEnemy()
+					if newEnemy then
+						currentTarget = newEnemy
+						local ch = LocalPlayer.Character
+						local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+						local ehrp = newEnemy:FindFirstChild("HumanoidRootPart")
+						if hrp and ehrp then
+							local dist = (ehrp.Position - hrp.Position).Magnitude
+							if dist > 3 then
+								targetOriginalY = ehrp.Position.Y
+								local hoverY = targetOriginalY + cfg.farmHeight
+								_stopFlightFn()
+								currentTarget = newEnemy  -- _stopFlightFn cleared it
+								_tweenHRPTo(hrp, Vector3.new(ehrp.Position.X, hoverY, ehrp.Position.Z))
+								startFlight()
+							end
+						end
+					end
+					jwait(0.15)
+					return
 				end
 
 				-- Standard RegisterAttack+RegisterHit protocol with self-generated hash.
