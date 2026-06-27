@@ -456,7 +456,10 @@ function Module.start(lib)
 	local autoSeaState = { lastQuestKey = nil }
 
 	local function autoSea1Tick()
-		local level = LocalPlayer.Data.Level.Value
+		local data = LocalPlayer:FindFirstChild("Data")
+		local levelVal = data and data:FindFirstChild("Level")
+		if not levelVal then return end  -- Data not populated yet; try again next tick
+		local level = levelVal.Value
 		local quest = pickQuest(level)
 		if not quest then
 			-- Level past Sea 1's farmable range — turn off + notify
@@ -641,11 +644,36 @@ function Module.start(lib)
 					end
 
 					-- No hash yet? Trigger the combat code path directly by
-					-- firing every registered listener on Tool.Activated and
-					-- Mouse.Button1Down. The flight loop has us hovering above
-					-- the enemy so Mouse.Hit naturally points at it; the
-					-- combat handler reads that, fires RegisterHit with a
-					-- fresh hash, and the spy hook above catches it.
+					-- firing every registered listener on Tool.Activated,
+					-- Mouse.Button1Down, and UserInputService.InputBegan.
+					-- The flight loop has us hovering above the enemy so
+					-- Mouse.Hit naturally points at it; the combat handler
+					-- reads that, fires RegisterHit with a fresh hash, and
+					-- the spy hook above catches it.
+					if not getHash() then
+						-- Diagnostic: log this once per session so F9 tells
+						-- us what executor exports we have and how many
+						-- listeners are bound to each signal.
+						if not SPY._captureProbed then
+							SPY._captureProbed = true
+							local hasGC = typeof(getconnections) == "function"
+							local hasFS = typeof(firesignal) == "function"
+							local tool = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Tool")
+							local nTool, nMouse, nUIS = 0, 0, 0
+							if hasGC then
+								if tool then nTool = #getconnections(tool.Activated) end
+								local mouse = LocalPlayer:GetMouse()
+								nMouse = #getconnections(mouse.Button1Down)
+								nUIS = #getconnections(UserInputService.InputBegan)
+							end
+							warn(string.format(
+								"[Vellum BF] capture probe: getconnections=%s firesignal=%s tool=%s tool.Activated=%d mouse.Button1Down=%d UIS.InputBegan=%d",
+								tostring(hasGC), tostring(hasFS),
+								tool and tool.Name or "<none>",
+								nTool, nMouse, nUIS
+							))
+						end
+					end
 					if not getHash() then
 						local cam = workspace.CurrentCamera
 						local ehrp = enemy:FindFirstChild("HumanoidRootPart")
@@ -679,6 +707,23 @@ function Module.start(lib)
 							local mouse = LocalPlayer:GetMouse()
 							for _, conn in ipairs(getconnections(mouse.Button1Down)) do
 								safe(function() conn:Fire() end)
+								triggered = true
+							end
+						end
+
+						-- UserInputService.InputBegan — modern BF scripts wire
+						-- M1 here instead of Mouse.Button1Down. Firing requires
+						-- a fake InputObject; most executors accept a stub.
+						if typeof(getconnections) == "function" then
+							for _, conn in ipairs(getconnections(UserInputService.InputBegan)) do
+								safe(function()
+									conn:Fire({
+										UserInputType = Enum.UserInputType.MouseButton1,
+										UserInputState = Enum.UserInputState.Begin,
+										KeyCode = Enum.KeyCode.Unknown,
+										Position = Vector3.new(0, 0, 0),
+									}, false)
+								end)
 								triggered = true
 							end
 						end
@@ -744,22 +789,29 @@ function Module.start(lib)
 		end)
 	end
 
-	-- track XP / Beli gain for the stats panel
+	-- track XP / Beli gain for the stats panel. LocalPlayer.Data is populated
+	-- by BF's server script after character spawn, so we WaitForChild before
+	-- touching it. nil-safe inner reads for the (rare) case of mid-session
+	-- data wipe on respawn.
 	local function trackProgressLoop()
-		local lastXP = LocalPlayer.Data.Exp.Value
-		local lastBeli = LocalPlayer.Data.Beli.Value
+		local data = LocalPlayer:WaitForChild("Data", 30)
+		if not data then return end
+		local expVal = data:WaitForChild("Exp", 10)
+		local beliVal = data:WaitForChild("Beli", 10)
+		if not (expVal and beliVal) then return end
+
+		local lastXP, lastBeli = expVal.Value, beliVal.Value
 		while gui.Parent do
 			task.wait(1)
-			local xp = LocalPlayer.Data.Exp.Value
-			local beli = LocalPlayer.Data.Beli.Value
+			local xp = expVal.Value
+			local beli = beliVal.Value
 			if xp > lastXP then
 				stats.sessionXP = stats.sessionXP + (xp - lastXP)
 			end
 			if beli > lastBeli then
 				stats.sessionBeli = stats.sessionBeli + (beli - lastBeli)
 			end
-			lastXP = xp
-			lastBeli = beli
+			lastXP, lastBeli = xp, beli
 		end
 	end
 
