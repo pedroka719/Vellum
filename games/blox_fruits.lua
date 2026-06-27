@@ -333,6 +333,139 @@ function Module.start(lib)
 		return true
 	end
 
+	-- ═══════════════════════════ COMBAT FRAMEWORK ═══════════════════════════
+	-- The real way hubs farm: skip RegisterAttack/RegisterHit and the whole
+	-- hash dance. Go through BF's own CombatFramework module: pull its
+	-- activeController via debug.getupvalues(require(...)), step the
+	-- internal LCG state that drives Validator, fire Validator +
+	-- RigControllerEvent("hit", ...) with deduplicated getBladeHits.
+	-- 60-stud AOE per swing, server-validated, no hash needed.
+	--
+	-- Pattern adapted from REDz / Ronix / Mukuro hubs.
+	local CombatFW = nil  -- resolved once: { moduleTable, RigLib, rigEvent, validator }
+
+	local function resolveCombatFW()
+		if CombatFW then return CombatFW end
+		if typeof(debug) ~= "table" or typeof(debug.getupvalues) ~= "function" then return nil end
+
+		local playerScripts = LocalPlayer:FindFirstChild("PlayerScripts")
+		local fwModule = playerScripts and playerScripts:FindFirstChild("CombatFramework")
+		if not fwModule then return nil end
+
+		local ok, ups = pcall(function() return debug.getupvalues(require(fwModule)) end)
+		if not ok or type(ups) ~= "table" or not ups[2] then return nil end
+
+		local rigLibModule = ReplicatedStorage:FindFirstChild("CombatFramework")
+		rigLibModule = rigLibModule and rigLibModule:FindFirstChild("RigLib")
+		if not rigLibModule then return nil end
+		local ok2, RigLib = pcall(require, rigLibModule)
+		if not ok2 or type(RigLib) ~= "table" or typeof(RigLib.getBladeHits) ~= "function" then return nil end
+
+		local rigEvent = ReplicatedStorage:FindFirstChild("RigControllerEvent")
+		local validator = Remotes:FindFirstChild("Validator")
+		if not (rigEvent and validator) then return nil end
+
+		CombatFW = {
+			moduleTable = ups[2],
+			RigLib      = RigLib,
+			rigEvent    = rigEvent,
+			validator   = validator,
+		}
+		return CombatFW
+	end
+
+	local function getCurrentBlade()
+		local fw = CombatFW
+		if not fw then return nil end
+		local ac = fw.moduleTable.activeController
+		if not (ac and ac.blades and ac.blades[1]) then return nil end
+		local blade = ac.blades[1]
+		local guard = 0
+		while blade and blade.Parent ~= LocalPlayer.Character and guard < 8 do
+			blade = blade.Parent
+			guard = guard + 1
+		end
+		return blade
+	end
+
+	local function getDeduplicatedHits()
+		local fw = CombatFW
+		local ch = LocalPlayer.Character
+		local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+		if not (fw and hrp) then return {} end
+		local ok, raw = pcall(fw.RigLib.getBladeHits, ch, { hrp }, 60)
+		if not ok or type(raw) ~= "table" then return {} end
+		local out, seen = {}, {}
+		for _, part in ipairs(raw) do
+			local model = part.Parent
+			if model and not seen[model] then
+				local mhrp = model:FindFirstChild("HumanoidRootPart")
+				if mhrp then
+					seen[model] = true
+					table.insert(out, mhrp)
+				end
+			end
+		end
+		return out
+	end
+
+	-- One swing via CombatFramework. Returns true on success.
+	local function attackCombatFW()
+		local fw = resolveCombatFW()
+		if not fw then return false end
+		local ac = fw.moduleTable.activeController
+		if not (ac and ac.attack) then return false end
+
+		-- Read internal LCG state from the attack closure's upvalues. Indices
+		-- 4-7 are: counter (4), increment (5), modulus_high (6), step (7) —
+		-- order matches the snippet from the hubs.
+		local ok7, u7 = pcall(debug.getupvalue, ac.attack, 4)
+		local ok8, u8 = pcall(debug.getupvalue, ac.attack, 5)
+		local ok9, u9 = pcall(debug.getupvalue, ac.attack, 6)
+		local ok10, u10 = pcall(debug.getupvalue, ac.attack, 7)
+		if not (ok7 and ok8 and ok9 and ok10) then return false end
+		if type(u7) ~= "number" or type(u8) ~= "number" or type(u9) ~= "number" or type(u10) ~= "number" then
+			return false
+		end
+
+		-- Step the LCG (game's internal validator formula).
+		local u12 = (u8 * 798405 + u7 * 727595) % u9
+		local u13 = u7 * 798405
+		u12 = (u12 * u9 + u13) % 1099511627776
+		u8  = math.floor(u12 / u9)
+		u7  = u12 - u8 * u9
+		u10 = u10 + 1
+
+		pcall(debug.setupvalue, ac.attack, 4, u7)
+		pcall(debug.setupvalue, ac.attack, 5, u8)
+		pcall(debug.setupvalue, ac.attack, 6, u9)
+		pcall(debug.setupvalue, ac.attack, 7, u10)
+
+		local validatorValue = math.floor(u12 / 1099511627776 * 16777215)
+
+		-- Play attack animations so the swing looks legitimate to other clients.
+		pcall(function()
+			if ac.animator and ac.animator.anims and ac.animator.anims.basic then
+				for _, anim in pairs(ac.animator.anims.basic) do
+					anim:Play()
+				end
+			end
+		end)
+
+		local blade = getCurrentBlade()
+		if not blade then return false end
+
+		safe(function() fw.rigEvent:FireServer("weaponChange", tostring(blade)) end)
+		safe(function() fw.validator:FireServer(validatorValue, u10) end)
+
+		local hits = getDeduplicatedHits()
+		if #hits > 0 then
+			safe(function() fw.rigEvent:FireServer("hit", hits, 1, "") end)
+		end
+
+		return true
+	end
+
 	-- ═══════════════════════════ TARGETING ═══════════════════════════
 	-- Score = inverse distance + level-fit. Closer + within range = higher.
 	-- Filter values are a *preference*, not a hard gate. If nothing matches
@@ -765,66 +898,51 @@ function Module.start(lib)
 	local function autoFarmLoop()
 		while gui.Parent do
 			if _tpInProgress then jwait(1.0) continue end
-			if cfg.autoFarm then
-				if not flightConn then startFlight() end
-
-				-- No hash yet? Try pulling it from the combat module's closure
-				-- upvalues via getgc. No synthetic click, no Mouse hook —
-				-- just read the 8-hex string where it already lives in memory.
-				if not getHash() then
-					ensureToolEquipped()
-					local h, scanned, matched = extractHashFromGC()
-					if h then
-						SPY.hash = h
-						warn(string.format(
-							"[Vellum BF] hash extracted via gc scan: %s (scanned=%d matched=%d)",
-							h, scanned or -1, matched or -1
-						))
-						task.spawn(function()
-							Toast.show({
-								title = "Hash captured",
-								body  = "Pulled directly from the combat module — full-speed farm engaged.",
-								kind  = "success", duration = 4,
-							})
-						end)
-					elseif not SPY._gcProbed then
-						SPY._gcProbed = true
-						warn(string.format(
-							"[Vellum BF] gc scan probe: getgc=%s debug.getupvalues=%s scanned=%d matched=%d hash=nil",
-							tostring(typeof(getgc) == "function"),
-							tostring(typeof(debug) == "table" and typeof(debug.getupvalues) == "function"),
-							scanned or -1, matched or -1
-						))
-					end
-					jwait(0.5)
-					continue
-				end
-
-				safe(function()
-					local enemy = currentTarget
-					if not enemy or not enemy.Parent then
-						jwait(0.3); return
-					end
-
-					-- Hash captured — normal attack flow.
-					local guard = 0
-					while enemy.Parent and cfg.autoFarm and getHash() and guard < 200 do
-						attackOnce(enemy)
-						guard = guard + 1
-						-- +/-20% jitter so fixed-period swings stop being a fingerprint.
-						jwait(cfg.attackCadence * (0.8 + math.random() * 0.4))
-					end
-
-					if enemy and not enemy.Parent then
-						stats.sessionKills = stats.sessionKills + 1
-						currentTarget = nil
-						targetOriginalY = nil
-					end
-				end)
-			else
+			if not cfg.autoFarm then
 				_stopFlightFn()
 				jwait(0.5)
+				continue
 			end
+
+			if not flightConn then startFlight() end
+			ensureToolEquipped()
+
+			-- Probe CombatFramework once and report shape so F9 confirms
+			-- we resolved the controller / RigLib / Validator path.
+			if not SPY._fwProbed then
+				SPY._fwProbed = true
+				local fw = resolveCombatFW()
+				warn(string.format(
+					"[Vellum BF] CombatFW probe: resolved=%s controller=%s riglib=%s validator=%s",
+					tostring(fw ~= nil),
+					tostring(fw and fw.moduleTable and fw.moduleTable.activeController ~= nil),
+					tostring(fw and fw.RigLib ~= nil),
+					tostring(fw and fw.validator ~= nil)
+				))
+			end
+
+			safe(function()
+				local enemy = currentTarget
+				if not enemy or not enemy.Parent then
+					jwait(0.3); return
+				end
+
+				-- Path A: CombatFramework (preferred — no hash, AOE).
+				-- Path B: legacy hash+RegisterHit (only if we already captured a hash somehow).
+				local landed = attackCombatFW()
+				if not landed and getHash() then
+					landed = attackOnce(enemy)
+				end
+
+				if enemy and not enemy.Parent then
+					stats.sessionKills = stats.sessionKills + 1
+					currentTarget = nil
+					targetOriginalY = nil
+				end
+			end)
+
+			-- ±20% jitter so fixed-period swings stop being a fingerprint.
+			jwait(cfg.attackCadence * (0.8 + math.random() * 0.4))
 		end
 	end
 
@@ -898,14 +1016,7 @@ function Module.start(lib)
 		function() return cfg.autoFarm end,
 		function(v)
 			cfg.autoFarm = v
-			if v and not getHash() then
-				ensureToolEquipped()
-				Toast.show({
-					title = "Capturing session hash",
-					body  = "Flying you above a target and triggering a synthetic swing with mouse-hit redirect — should land in a few seconds.",
-					kind  = "info", duration = 5,
-				})
-			end
+			if v then ensureToolEquipped() end
 		end)
 	ui.intervalRow(farm, "Attack cadence (sec)",
 		function() return cfg.attackCadence end,
@@ -938,14 +1049,7 @@ function Module.start(lib)
 			cfg.autoSea1 = v
 			if v then
 				cfg.autoFarm = true  -- auto-farm is implied
-				if not getHash() then
-					ensureToolEquipped()
-					Toast.show({
-						title = "Capturing session hash",
-						body  = "Sea 1 progression armed. Synthetic swing fires once we hover above a mob — hash should land within seconds.",
-						kind  = "info", duration = 5,
-					})
-				end
+				ensureToolEquipped()
 			end
 		end)
 
