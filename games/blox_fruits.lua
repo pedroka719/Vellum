@@ -224,100 +224,61 @@ function Module.start(lib)
 	end
 
 	-- ═══════════════════════════ ISLAND MAP ═══════════════════════════
-	-- Sea 1 destinations. Coordinates come from workspace._WorldOrigin.Locations
-	-- — the same positions BF uses to register "you're at this island". Surface
-	-- and clearance handled per-TP by _findClearLanding via raycast.
+	-- Sea 1 destinations. Coordinates lifted from RoyxHub's verified set —
+	-- their hub uses these exact CFrames and they survive BF's anti-cheat.
+	-- An island with `portal = <name>` is reached through a BF portal pad
+	-- (see PORTAL_PADS below) rather than a raw tween.
 	local ISLANDS = {
-		{ name = "Pirate Starter",  pos = Vector3.new(1014, 16,  1462),  lvlRange = "Lv 1-9"     },
-		{ name = "Marine Starter",  pos = Vector3.new(-2921, -4,  2111), lvlRange = "Lv 1-9"     },
-		{ name = "Middle Town",     pos = Vector3.new(-833, 3,    1628), lvlRange = "Lv 10-14"   },
-		{ name = "Jungle",          pos = Vector3.new(-1419, 3,   -76),  lvlRange = "Lv 15-29"   },
-		{ name = "Pirate Village",  pos = Vector3.new(-1133, 3,   4176), lvlRange = "Lv 30-59"   },
-		{ name = "Desert",          pos = Vector3.new(1193, -7,   4430), lvlRange = "Lv 60-89"   },
-		{ name = "Frozen Village",  pos = Vector3.new(1276, -7,  -1472), lvlRange = "Lv 90-119"  },
-		{ name = "Marine Fortress", pos = Vector3.new(-4935, -7,  4318), lvlRange = "Lv 120-149" },
-		{ name = "Skylands",        pos = Vector3.new(-4622, 837, -1817),lvlRange = "Lv 150-249" },
-		{ name = "Prison",          pos = Vector3.new(5277, -7,    743), lvlRange = "Lv 250-324" },
-		{ name = "Colosseum",       pos = Vector3.new(-1685, -7, -3200), lvlRange = "PvP"        },
-		{ name = "Magma Village",   pos = Vector3.new(-5528, -7,  8691), lvlRange = "Lv 325-449" },
-		{ name = "Underwater City", pos = Vector3.new(61379, -7,  1473), lvlRange = "Lv 450-624" },
-		{ name = "Fountain City",   pos = Vector3.new(5717, -7,   4356), lvlRange = "Lv 625-749" },
+		{ name = "Pirate Starter",  pos = Vector3.new(979.8, 16.5, 1429.0),    lvlRange = "Lv 1-9"     },
+		{ name = "Marine Starter",  pos = Vector3.new(-2566.4, 6.9, 2045.3),   lvlRange = "Lv 1-9"     },
+		{ name = "Middle Town",     pos = Vector3.new(-690.3, 15.1, 1582.2),   lvlRange = "Lv 10-14"   },
+		{ name = "Jungle",          pos = Vector3.new(-1612.8, 36.9, 149.1),   lvlRange = "Lv 15-29"   },
+		{ name = "Pirate Village",  pos = Vector3.new(-1181.3, 4.8, 3803.5),   lvlRange = "Lv 30-59"   },
+		{ name = "Desert",          pos = Vector3.new(944.2, 20.9, 4373.3),    lvlRange = "Lv 60-89"   },
+		{ name = "Frozen Village",  pos = Vector3.new(1347.8, 104.7, -1319.7), lvlRange = "Lv 90-119"  },
+		{ name = "Marine Fortress", pos = Vector3.new(-4914.8, 51.0, 4281.0),  lvlRange = "Lv 120-149" },
+		{ name = "Skylands",        pos = Vector3.new(-483.7, 332.0, 595.3),   lvlRange = "Lv 150-249" },
+		{ name = "Prison",          pos = Vector3.new(4875.3, 5.7, 734.9),     lvlRange = "Lv 250-324" },
+		{ name = "Colosseum",       pos = Vector3.new(-11.3, 29.3, 2771.5),    lvlRange = "PvP"        },
+		{ name = "Magma Village",   pos = Vector3.new(-5247.7, 12.9, 8504.9),  lvlRange = "Lv 325-449" },
+		{ name = "Underwater City", pos = Vector3.new(61165.2, 0.2, 1897.4),   lvlRange = "Lv 450-624", portal = "UnderwaterExit" },
+		{ name = "Fountain City",   pos = Vector3.new(5127.1, 59.5, 4105.4),   lvlRange = "Lv 625-749" },
 	}
 
 	local ISLAND_BY_NAME = {}
 	for _, i in ipairs(ISLANDS) do ISLAND_BY_NAME[i.name] = i end
 
-	-- Island TP via TweenService. Empirically: BF's anti-cheat rejects single
-	-- CFrame deltas > ~10K studs (rollback) and flags sustained BodyVelocity
-	-- (rollback + kick). Tween CFrame writes don't register as either.
-	--
-	--   * Near islands (< TP_HOP_DIST): one tween at 350 studs/sec.
-	--   * Far islands: segmented hops of ≤TP_HOP_DIST at 1500 studs/sec with
-	--     a 0.3s pause between hops to reset the unnatural-movement timer.
-	--
-	-- Verified clean across 57K+ studs (start → Underwater City).
-	local TP_TWEEN_SPEED = 350
-	local TP_HIGH_SPEED = 1500
-	local TP_HOP_DIST = 15000
+	-- BF portal pads. Stand on/near the pad position, fire CommF_:requestEntrance
+	-- with that Vector3, and the server completes the warp through the linked
+	-- portal — same path the Portal Fruit / Sea Portal uses. Server-authorized,
+	-- no rollback. The pad is where the PLAYER must be; destination is the
+	-- island's pos in ISLANDS above.
+	local PORTAL_PADS = {
+		UnderwaterExit = Vector3.new(4050, -1, -1814),    -- surface pad → Underwater City
+		Sky3Exit       = Vector3.new(-4607, 874, -1667),  -- sky portal (Skylands variant)
+	}
 
-	-- Forward-declared so tpToIsland can call them. Some executors miscompile
-	-- `local function` forward refs, so we assign into pre-declared locals.
-	local _tpFilterCache
-	local _tpRaycastParams
-	local _findClearLanding
+	-- Island TP — pisun-hub pattern, the one that actually works.
+	--
+	-- BF's anti-cheat watches HRP per-frame: it rolls back tweens that finish
+	-- in under ~5 seconds (any distance) and any single CFrame delta past a
+	-- modest threshold. The bypass:
+	--   1. If destination Y differs by > Y_SNAP_THRESHOLD from current, snap
+	--      Y first with a direct CFrame write, wait 0.5s for the server to
+	--      reconcile. BF tolerates pure vertical jumps better than diagonals.
+	--   2. Tween HRP CFrame to the destination at TP_TWEEN_SPEED studs/sec
+	--      linear. ~220 keeps duration well above the 5s detection floor for
+	--      any non-trivial trip.
+	--   3. For destinations behind a server-side portal (Underwater City),
+	--      tween to the portal pad first, then fire CommF_:requestEntrance —
+	--      the server completes the warp legitimately, no rollback risk.
+	local TP_TWEEN_SPEED   = 220
+	local Y_SNAP_THRESHOLD = 75
+	local activeTween
+
+	-- Forward-declared so tpToIsland can call _stopFlightFn. Some executors
+	-- miscompile `local function` forward refs, so we assign into a pre-decl.
 	local _stopFlightFn
-
-	_tpRaycastParams = function()
-		if not _tpFilterCache then
-			_tpFilterCache = RaycastParams.new()
-			_tpFilterCache.FilterType = Enum.RaycastFilterType.Blacklist
-		end
-		local filter = {game:GetService("Players").LocalPlayer.Character}
-		for _, v in ipairs(workspace:GetChildren()) do
-			if v.Name:sub(1, 20) == "Vellum_IslandAnchor_" then
-				table.insert(filter, v)
-			end
-		end
-		_tpFilterCache.FilterDescendantsInstances = filter
-		return _tpFilterCache
-	end
-
-	_findClearLanding = function(xzPos, isSky)
-		local rp = _tpRaycastParams()
-		local startY = isSky and (xzPos.Y + 300) or (xzPos.Y + 600)
-		local length = isSky and 500 or 800
-		local fallbackY = xzPos.Y + 6
-
-		local offsets = {
-			{0, 0},
-			{0, -12}, {0, 12}, {-12, 0}, {12, 0},
-			{-8, -8}, {8, -8}, {-8, 8}, {8, 8},
-			{0, -20}, {0, 20}, {-20, 0}, {20, 0},
-		}
-		local best, bestScore
-		for _, off in ipairs(offsets) do
-			local dx, dz = off[1], off[2]
-			local probe = Vector3.new(xzPos.X + dx, startY, xzPos.Z + dz)
-			local down = workspace:Raycast(probe, Vector3.new(0, -length, 0), rp)
-			if down then
-				local origin = Vector3.new(xzPos.X + dx, down.Position.Y + 1, xzPos.Z + dz)
-				local walls = 0
-				for _, d in ipairs({{3, 0, 0}, {-3, 0, 0}, {0, 0, 3}, {0, 0, -3}}) do
-					if workspace:Raycast(origin, Vector3.new(d[1], d[2], d[3]), rp) then
-						walls = walls + 1
-					end
-				end
-				if walls == 0 then
-					local dist = math.sqrt(dx * dx + dz * dz)
-					if not best or dist < bestScore then
-						best = Vector3.new(xzPos.X + dx, down.Position.Y + 3, xzPos.Z + dz)
-						bestScore = dist
-					end
-				end
-			end
-		end
-		return best or Vector3.new(xzPos.X, fallbackY, xzPos.Z)
-	end
 
 	_stopFlightFn = function()
 		if flightConn then flightConn:Disconnect(); flightConn = nil end
@@ -328,6 +289,29 @@ function Module.start(lib)
 		currentTarget = nil
 		targetOriginalY = nil
 		hoverEnabled = false
+	end
+
+	local function _tweenHRPTo(hrp, destPos)
+		if activeTween then pcall(function() activeTween:Cancel() end) end
+
+		-- Y-snap pre-pass. Lifts/drops us to destination altitude first, so
+		-- the main tween only has to cover horizontal distance.
+		local yDelta = math.abs(destPos.Y - hrp.Position.Y)
+		if yDelta > Y_SNAP_THRESHOLD then
+			hrp.CFrame = CFrame.new(hrp.Position.X, destPos.Y, hrp.Position.Z)
+			task.wait(0.5)
+		end
+
+		local destCF = CFrame.new(destPos, destPos - Vector3.new(0, 0, 1))
+		local dist = (destPos - hrp.Position).Magnitude
+		if dist < 3 then return end
+
+		local dur = math.max(0.1, dist / TP_TWEEN_SPEED)
+		local tween = TweenService:Create(hrp, TweenInfo.new(dur, Enum.EasingStyle.Linear), { CFrame = destCF })
+		activeTween = tween
+		tween:Play()
+		tween.Completed:Wait()
+		if activeTween == tween then activeTween = nil end
 	end
 
 	local function tpToIsland(name)
@@ -342,69 +326,21 @@ function Module.start(lib)
 		local restoreAutoSea1 = cfg.autoSea1
 		cfg.autoFarm = false
 		cfg.autoSea1 = false
-		if _stopFlightFn then _stopFlightFn() end
+		_stopFlightFn()
 
-		local isSkyIsland = island.pos.Y > 500
-		local ok, dest
-		if _findClearLanding then
-			ok, dest = pcall(_findClearLanding, island.pos, isSkyIsland)
-		end
-		if not ok then
-			if dest ~= nil then warn("[Vellum BF] findClearLanding error:", dest) end
-			dest = Vector3.new(island.pos.X, island.pos.Y + 6, island.pos.Z)
-		end
-
-		if (dest - hrp.Position).Magnitude < 3 then
-			cfg.autoFarm = restoreAutoFarm
-			cfg.autoSea1 = restoreAutoSea1
-			_tpInProgress = false
-			return true
-		end
-
-		-- Single tween for nearby islands; segmented high-speed hops
-		-- for far ones.
-		local dist = (dest - hrp.Position).Magnitude
-		local needMultiHop = dist > TP_HOP_DIST
-		local speed = needMultiHop and TP_HIGH_SPEED or TP_TWEEN_SPEED
-
-		if needMultiHop then
-			local startPos = hrp.Position
-			local numHops = math.max(2, math.ceil(dist / TP_HOP_DIST))
-			for i = 1, numHops do
-				local t = i / numHops
-				local hopPos = startPos:Lerp(dest, t)
-				local hopDist = (hopPos - hrp.Position).Magnitude
-				if hopDist > 1 then
-					local hopCF = CFrame.new(hopPos, hopPos - Vector3.new(0, 0, 1))
-					local hopDur = math.max(0.1, hopDist / speed)
-					local tween = TweenService:Create(hrp, TweenInfo.new(hopDur, Enum.EasingStyle.Linear), { CFrame = hopCF })
-					tween:Play()
-					tween.Completed:Wait()
-				end
-				if i < numHops then task.wait(0.3) end
-			end
+		-- Portal-fronted destination: tween to the pad, fire requestEntrance,
+		-- let the server finish the warp.
+		if island.portal and PORTAL_PADS[island.portal] then
+			local padPos = PORTAL_PADS[island.portal]
+			_tweenHRPTo(hrp, padPos + Vector3.new(0, 4, 0))
+			safe(function() R.CommF_:InvokeServer("requestEntrance", padPos) end)
+			-- Bump up 50 studs so we don't immediately re-trigger the same pad
+			hrp.CFrame = hrp.CFrame + Vector3.new(0, 50, 0)
+			task.wait(1.5)  -- server completes portal warp
 		else
-			local dur = math.max(0.1, dist / speed)
-			local cf = CFrame.new(dest, dest - Vector3.new(0, 0, 1))
-			local tween = TweenService:Create(hrp, TweenInfo.new(dur, Enum.EasingStyle.Linear), { CFrame = cf })
-			tween:Play()
-			tween.Completed:Wait()
+			local landingPos = island.pos + Vector3.new(0, 4, 0)
+			_tweenHRPTo(hrp, landingPos)
 		end
-
-		-- Settle: brief BodyPosition hold so we don't slide off the landing
-		local bp = Instance.new("BodyPosition")
-		bp.Name = "Vellum_SettleBP"
-		bp.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
-		bp.P = 8000
-		bp.D = 600
-		bp.Position = dest
-		bp.Parent = hrp
-
-		local settleStart = os.clock()
-		while bp.Parent and os.clock() - settleStart < 3.0 do
-			task.wait(0.1)
-		end
-		if bp.Parent then bp:Destroy() end
 
 		task.wait(0.3)
 		_tpInProgress = false
