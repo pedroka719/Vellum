@@ -128,6 +128,11 @@ function Module.start(lib)
 	SPY.log = SPY.log or {}
 	SPY.frozen = false
 
+	-- Teleport-in-progress guard. Prevents the flight loop from interfering
+	-- with BodyVelocity-based island teleportation (CFrame lerp + velocity
+	-- zeroing would counteract the BV and/or trigger anti-cheat rollback).
+	local _tpInProgress = false
+
 	-- read current hash (may be set from a prior boot)
 	local function getHash() return SPY.hash end
 
@@ -317,7 +322,68 @@ function Module.start(lib)
 	-- velocity-mag throttle. 60K-stud trips (UC ↔ start area) take ~90s
 	-- which is still better than getting rolled back forever.
 	local TP_BV_SPEED = 700
+	local TP_CRUISE_Y = 250  -- safe altitude above all ground obstacles
 	local activeTpBV
+
+	-- Raycast params builder shared across teleport helpers.
+	-- Excludes the local character and any Vellum ESP anchor parts.
+	local _tpFilterCache
+	local function _tpRaycastParams()
+		if not _tpFilterCache then
+			_tpFilterCache = RaycastParams.new()
+			_tpFilterCache.FilterType = Enum.RaycastFilterType.Blacklist
+		end
+		local filter = {game:GetService("Players").LocalPlayer.Character}
+		for _, v in ipairs(workspace:GetChildren()) do
+			if v.Name:sub(1, 20) == "Vellum_IslandAnchor_" then
+				table.insert(filter, v)
+			end
+		end
+		_tpFilterCache.FilterDescendantsInstances = filter
+		return _tpFilterCache
+	end
+
+	-- Probe 12+ XZ offsets from altitude; return the closest clear spot.
+	-- Hardcoded island.pos Y values sit 40-190 studs below terrain AND the
+	-- exact XZ can be inside a building — we need surface detection AND an
+	-- open-air landing to avoid spawning inside terrain or walls.
+	local function findClearLanding(xzPos, isSky)
+		local rp = _tpRaycastParams()
+		local startY = isSky and (xzPos.Y + 300) or (xzPos.Y + 600)
+		local length = isSky and 500 or 800
+		local fallbackY = xzPos.Y + 6
+
+		local offsets = {
+			{0, 0},
+			{0, -12}, {0, 12}, {-12, 0}, {12, 0},
+			{-8, -8}, {8, -8}, {-8, 8}, {8, 8},
+			{0, -20}, {0, 20}, {-20, 0}, {20, 0},
+		}
+		local best, bestScore
+		for _, off in ipairs(offsets) do
+			local dx, dz = off[1], off[2]
+			local probe = Vector3.new(xzPos.X + dx, startY, xzPos.Z + dz)
+			local down = workspace:Raycast(probe, Vector3.new(0, -length, 0), rp)
+			if down then
+				local origin = Vector3.new(xzPos.X + dx, down.Position.Y + 1, xzPos.Z + dz)
+				local walls = 0
+				for _, d in ipairs({{3, 0, 0}, {-3, 0, 0}, {0, 0, 3}, {0, 0, -3}}) do
+					if workspace:Raycast(origin, Vector3.new(d[1], d[2], d[3]), rp) then
+						walls = walls + 1
+					end
+				end
+				if walls == 0 then
+					local dist = math.sqrt(dx * dx + dz * dz)
+					if not best or dist < bestScore then
+						best = Vector3.new(xzPos.X + dx, down.Position.Y + 3, xzPos.Z + dz)
+						bestScore = dist
+					end
+				end
+			end
+		end
+		return best or Vector3.new(xzPos.X, fallbackY, xzPos.Z)
+	end
+
 	local function tpToIsland(name)
 		local island = ISLAND_BY_NAME[name]
 		if not island then return false end
@@ -325,71 +391,85 @@ function Module.start(lib)
 		local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
 		if not hrp then return false end
 
-		-- Cancel any in-flight BV from a previous TP
 		if activeTpBV and activeTpBV.Parent then activeTpBV:Destroy() end
 
+		_tpInProgress = true
 		local restoreAutoFarm = cfg.autoFarm
 		local restoreAutoSea1 = cfg.autoSea1
 		cfg.autoFarm = false
 		cfg.autoSea1 = false
+		stopFlight()
 
-		local dest = island.pos + Vector3.new(0, 6, 0)
-		local direction = (dest - hrp.Position)
-		if direction.Magnitude < 1 then
+		local isSkyIsland = island.pos.Y > 500
+		local dest = findClearLanding(island.pos, isSkyIsland)
+
+		if (dest - hrp.Position).Magnitude < 3 then
 			cfg.autoFarm = restoreAutoFarm
 			cfg.autoSea1 = restoreAutoSea1
+			_tpInProgress = false
 			return true
 		end
-		direction = direction.Unit
+
+		-- Ascend above all terrain, cruise at altitude, descend to surface
+		local cruiseY = isSkyIsland and (dest.Y + 60) or TP_CRUISE_Y
 
 		local bv = Instance.new("BodyVelocity")
 		bv.Name = "Vellum_TP_BV"
 		bv.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
-		bv.Velocity = direction * TP_BV_SPEED
 		bv.Parent = hrp
 		activeTpBV = bv
 
-		-- Steering loop — re-aim each tick in case the player drifts.
-		-- When we arrive (within 80 studs), do NOT destroy the BV — instead
-		-- pin the player at the destination by clamping the BV velocity to
-		-- counter any rollback. Hold for ~2s so the server reconciles the
-		-- new position, then ramp velocity down and clean up.
 		task.spawn(function()
 			local t0 = os.clock()
-			local arrived = false
-			-- Flight phase: re-aim toward dest at full speed
+
+			-- Ascend to cruise altitude
+			if hrp.Position.Y < cruiseY - 10 then
+				while bv.Parent and (os.clock() - t0) < 30 do
+					if hrp.Position.Y >= cruiseY - 5 then break end
+					bv.Velocity = Vector3.new(0, TP_BV_SPEED, 0)
+					task.wait(0.1)
+				end
+			end
+
+			-- Cruise at altitude toward island
+			while bv.Parent and (os.clock() - t0) < 180 do
+				local horiz = Vector3.new(hrp.Position.X - dest.X, 0, hrp.Position.Z - dest.Z)
+				if horiz.Magnitude < 100 then break end
+				bv.Velocity = (Vector3.new(dest.X, cruiseY, dest.Z) - hrp.Position).Unit * TP_BV_SPEED
+				task.wait(0.1)
+			end
+
+			-- Descend to surface
 			while bv.Parent and (os.clock() - t0) < 180 do
 				local d = (hrp.Position - dest).Magnitude
-				if d < 80 then arrived = true; break end
+				if d < 8 then break end
 				bv.Velocity = (dest - hrp.Position).Unit * TP_BV_SPEED
 				task.wait(0.1)
 			end
 
-			if arrived and bv.Parent then
-				-- Settle phase: hold player at destination for 2.5s. Each
-				-- tick, push toward dest with declining force so we don't
-				-- ricochet off geometry. This overpowers the server's
-				-- rollback assertion long enough for it to accept the new
-				-- position as authoritative.
+			if bv.Parent then
+				bv:Destroy()
+				if activeTpBV == bv then activeTpBV = nil end
+
+				local bp = Instance.new("BodyPosition")
+				bp.Name = "Vellum_SettleBP"
+				bp.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+				bp.P = 8000
+				bp.D = 600
+				bp.Position = dest
+				bp.Parent = hrp
+
 				local settleStart = os.clock()
-				while bv.Parent and os.clock() - settleStart < 2.5 do
-					local offset = dest - hrp.Position
-					local d = offset.Magnitude
-					if d > 0.5 then
-						-- correctional push: stronger the further we drifted,
-						-- but never above 400 (well under the throttle)
-						local pushMag = math.min(400, d * 4)
-						bv.Velocity = offset.Unit * pushMag
-					else
-						bv.Velocity = Vector3.new(0, 0, 0)
-					end
-					task.wait(0.05)
+				while bp.Parent and os.clock() - settleStart < 5.0 do
+					task.wait(0.1)
 				end
+				if bp.Parent then bp:Destroy() end
+			else
+				if activeTpBV == bv then activeTpBV = nil end
 			end
 
-			if bv.Parent then bv:Destroy() end
-			if activeTpBV == bv then activeTpBV = nil end
-			task.wait(0.3)
+			task.wait(0.5)
+			_tpInProgress = false
 			cfg.autoFarm = restoreAutoFarm
 			cfg.autoSea1 = restoreAutoSea1
 		end)
@@ -555,66 +635,93 @@ function Module.start(lib)
 	local lastHoldY            -- Y to hold when no enemy in range
 	local targetOriginalY      -- the Y the current target spawned at
 	local hoverEnabled = false -- only run flight while auto-farm is on
+	local _hoverBP             -- BodyPosition that holds us in the air
+	local _hoverBG             -- BodyGyro to keep us upright
 
 	local function stopFlight()
 		hoverEnabled = false
 		if flightConn then flightConn:Disconnect(); flightConn = nil end
+		if _hoverBP and _hoverBP.Parent then _hoverBP:Destroy() end
+		if _hoverBG and _hoverBG.Parent then _hoverBG:Destroy() end
+		_hoverBP = nil
+		_hoverBG = nil
 		currentTarget = nil
 		targetOriginalY = nil
 	end
 
 	local function startFlight()
 		if flightConn then return end
+		if _tpInProgress then return end  -- don't start during teleport
 		hoverEnabled = true
+
+		-- BodyPosition + BodyGyro: NO CFrame writes. BF's anti-cheat
+		-- flags HRP.CFrame modifications and rolls back to spawn.
+		-- BodyPosition achieves the same hover effect through physics,
+		-- which the server treats as legitimate movement.
+		local ch = LocalPlayer.Character
+		local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+		if not hrp then
+			stopFlight()
+			return
+		end
+
+		_hoverBP = Instance.new("BodyPosition")
+		_hoverBP.Name = "Vellum_HoverBP"
+		_hoverBP.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+		_hoverBP.P = 5000
+		_hoverBP.D = 200
+		_hoverBP.Position = hrp.Position
+		_hoverBP.Parent = hrp
+
+		_hoverBG = Instance.new("BodyGyro")
+		_hoverBG.Name = "Vellum_HoverBG"
+		_hoverBG.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
+		_hoverBG.P = 5000
+		_hoverBG.D = 500
+		_hoverBG.CFrame = hrp.CFrame
+		_hoverBG.Parent = hrp
+
 		flightConn = RunService.Heartbeat:Connect(function(dt)
 			if not (hoverEnabled and cfg.autoFarm) then stopFlight(); return end
+			if _tpInProgress then stopFlight(); return end
 
-			local ch = LocalPlayer.Character
-			local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
-			if not hrp then return end
+			local ch2 = LocalPlayer.Character
+			local hrp2 = ch2 and ch2:FindFirstChild("HumanoidRootPart")
+			if not hrp2 then return end
+			if not _hoverBP or not _hoverBP.Parent then stopFlight(); return end
+			if not _hoverBG or not _hoverBG.Parent then stopFlight(); return end
 
-			-- Kill any residual velocity so gravity can't accumulate downward
-			-- drift between heartbeats. We're CFrame-driven now.
-			hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-
-			-- Pick target each frame; lets us seamlessly switch when one dies
+			-- Pick target each frame; seamlessly switch when one dies
 			local enemy = (currentTarget and currentTarget.Parent) and currentTarget or pickEnemy()
 			currentTarget = enemy
 
-			local desired
 			if enemy then
 				local ehrp = enemy:FindFirstChild("HumanoidRootPart")
 				if ehrp then
 					if not targetOriginalY then
 						targetOriginalY = ehrp.Position.Y
 					end
-					-- Hover at a FIXED altitude (target's original Y + height)
-					-- so the aggressive pull can't push us into orbit
 					local hoverY = targetOriginalY + cfg.farmHeight
 					lastHoldY = hoverY
-					desired = CFrame.new(ehrp.Position.X, hoverY, ehrp.Position.Z)
+					_hoverBP.Position = Vector3.new(ehrp.Position.X, hoverY, ehrp.Position.Z)
 
-					-- Aggressive: pull target's HRP to (player.X, original_Y,
-					-- player.Z). XZ tracks us, Y locked at ground. No drift.
+					-- Aggressive range uses enemy CFrame — still technically
+					-- detectable by BF. Left as user opt-in.
 					if cfg.aggressiveRange then
-						ehrp.CFrame = CFrame.new(hrp.Position.X, targetOriginalY, hrp.Position.Z)
+						ehrp.CFrame = CFrame.new(hrp2.Position.X, targetOriginalY, hrp2.Position.Z)
 					end
 				end
 			else
-				-- No enemy in range: just hold altitude where we were
 				targetOriginalY = nil
-				local holdY = lastHoldY or hrp.Position.Y
-				desired = CFrame.new(hrp.Position.X, holdY, hrp.Position.Z)
-			end
-
-			if desired then
-				hrp.CFrame = hrp.CFrame:Lerp(desired, math.min(1, dt * 10))
+				local holdY = lastHoldY or hrp2.Position.Y
+				_hoverBP.Position = Vector3.new(hrp2.Position.X, holdY, hrp2.Position.Z)
 			end
 		end)
 	end
 
 	local function autoSea1Loop()
 		while gui.Parent do
+			if _tpInProgress then jwait(1.0) continue end
 			if cfg.autoSea1 then
 				safe(autoSea1Tick)
 				-- auto-Sea-1 implies auto-farm; flip it on if user forgot
@@ -626,6 +733,7 @@ function Module.start(lib)
 
 	local function autoFarmLoop()
 		while gui.Parent do
+			if _tpInProgress then jwait(1.0) continue end
 			if cfg.autoFarm and getHash() then
 				if not flightConn then startFlight() end
 
