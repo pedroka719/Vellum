@@ -295,41 +295,75 @@ function Module.start(lib)
 	local ISLAND_BY_NAME = {}
 	for _, i in ipairs(ISLANDS) do ISLAND_BY_NAME[i.name] = i end
 
-	-- Island TP via Model:PivotTo() — bypasses the rollback we hit with raw
-	-- `hrp.CFrame = ...` writes. Why this works:
-	--   * Direct CFrame assignment fires __newindex, goes through Roblox's
-	--     standard property pipeline, server validates against its physics
-	--     simulation, rejects implausible jumps, rolls player back to
-	--     LastSpawnPoint.
-	--   * Model:PivotTo() calls a C-level method that moves all parts via
-	--     a different replication path. Server accepts as "explicit
-	--     teleport" — same as game-side TP pads, no rollback.
+	-- Island TP via BodyVelocity-driven physics motion. Decoded by capturing
+	-- Ronix Hub's behavior: their 2,277 BodyVelocity instances during normal
+	-- play, vs zero metamethod hits on hrp.CFrame writes, told us they
+	-- don't teleport — they fly the player there via physics.
 	--
-	-- Verified live by capturing Ronix Hub's TP via Heartbeat jump poll:
-	-- their successful 63,730-stud TP to Underwater City didn't fire our
-	-- __newindex hook, but DID register as a single-frame position jump.
-	-- PivotTo is the only Roblox API matching that pattern.
+	-- Why physics wins over CFrame writes:
+	--   * `hrp.CFrame = ...` and `Model:PivotTo()` both ask the server to
+	--     accept an instant position change. After the first kick the
+	--     server gets strict and rolls them back to LastSpawnPoint.
+	--   * Continuous CFrame writes (TweenService) get the engine to derive
+	--     velocity from CFrame deltas; the fling-fix script throttles any
+	--     velocity above 750 to mag 100; tween desyncs.
+	--   * BodyVelocity sets a real physics velocity. The engine integrates
+	--     it normally. Server treats motion as legitimate physical movement
+	--     — same path used by every other physics-based ability in BF
+	--     (dash, jump, double jump). No rollback even from inside an
+	--     anti-cheat-strict zone like Underwater City.
 	--
-	-- Auto-loops still get paused during TP for the brief moment the
-	-- player is repositioning, then restored — the flight Heartbeat
-	-- would otherwise immediately lerp the player back toward an enemy.
+	-- Speed capped at 700 studs/sec to stay under the fling-fix's 750
+	-- velocity-mag throttle. 60K-stud trips (UC ↔ start area) take ~90s
+	-- which is still better than getting rolled back forever.
+	local TP_BV_SPEED = 700
+	local activeTpBV
 	local function tpToIsland(name)
 		local island = ISLAND_BY_NAME[name]
 		if not island then return false end
 		local ch = LocalPlayer.Character
-		if not ch or not ch:FindFirstChild("HumanoidRootPart") then return false end
+		local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+		if not hrp then return false end
+
+		-- Cancel any in-flight BV from a previous TP
+		if activeTpBV and activeTpBV.Parent then activeTpBV:Destroy() end
 
 		local restoreAutoFarm = cfg.autoFarm
 		local restoreAutoSea1 = cfg.autoSea1
 		cfg.autoFarm = false
 		cfg.autoSea1 = false
 
-		-- Lift Y by 6 so we land above the dock surface, not in the water
-		local dest = CFrame.new(island.pos + Vector3.new(0, 6, 0))
-		ch:PivotTo(dest)
+		local dest = island.pos + Vector3.new(0, 6, 0)
+		local direction = (dest - hrp.Position)
+		if direction.Magnitude < 1 then
+			cfg.autoFarm = restoreAutoFarm
+			cfg.autoSea1 = restoreAutoSea1
+			return true
+		end
+		direction = direction.Unit
 
+		local bv = Instance.new("BodyVelocity")
+		bv.Name = "Vellum_TP_BV"
+		bv.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+		bv.Velocity = direction * TP_BV_SPEED
+		bv.Parent = hrp
+		activeTpBV = bv
+
+		-- Steering loop — re-aim each frame in case the player drifts,
+		-- and clean up when we arrive (within 50 studs).
 		task.spawn(function()
-			task.wait(0.4)
+			local t0 = os.clock()
+			while bv.Parent and (os.clock() - t0) < 180 do
+				local d = (hrp.Position - dest).Magnitude
+				if d < 50 then break end
+				-- Re-aim each cycle. Small overshoots get corrected.
+				bv.Velocity = (dest - hrp.Position).Unit * TP_BV_SPEED
+				task.wait(0.15)
+			end
+			if bv.Parent then bv:Destroy() end
+			if activeTpBV == bv then activeTpBV = nil end
+			-- After arrival, restore the auto-loops
+			task.wait(0.3)
 			cfg.autoFarm = restoreAutoFarm
 			cfg.autoSea1 = restoreAutoSea1
 		end)
