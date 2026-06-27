@@ -234,29 +234,41 @@ function Module.start(lib)
 
 	-- ═══════════════════════════ TARGETING ═══════════════════════════
 	-- Score = inverse distance + level-fit. Closer + within range = higher.
+	-- Filter values are a *preference*, not a hard gate. If nothing matches
+	-- the name + level constraints, fall back to the closest alive enemy so
+	-- auto-farm never gets stuck silent. Stale filters from a prior Auto
+	-- Sea 1 quest tier were the worst offender here.
 	local function pickEnemy()
 		local ch = LocalPlayer.Character
 		local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
 		if not hrp then return nil end
 
-		local best, bestScore
+		local bestFiltered, bestFilteredScore
+		local bestAny, bestAnyScore
+
 		for _, e in ipairs(workspace.Enemies:GetChildren()) do
-			local lvl = e:GetAttribute("Level")
-			if lvl and lvl >= cfg.farmLevelMin and lvl <= cfg.farmLevelMax then
-				if cfg.farmTargetName == "" or e.Name == cfg.farmTargetName then
-					local ehrp = e:FindFirstChild("HumanoidRootPart")
-					local hum = e:FindFirstChild("Humanoid")
-					if ehrp and hum and hum.Health > 0 then
-						local d = (ehrp.Position - hrp.Position).Magnitude
-						local score = 1000 - d  -- closer = higher
-						if not bestScore or score > bestScore then
-							best, bestScore = e, score
-						end
+			local ehrp = e:FindFirstChild("HumanoidRootPart")
+			local hum  = e:FindFirstChild("Humanoid")
+			if ehrp and hum and hum.Health > 0 then
+				local d = (ehrp.Position - hrp.Position).Magnitude
+				local score = 1000 - d  -- closer = higher
+
+				if not bestAnyScore or score > bestAnyScore then
+					bestAny, bestAnyScore = e, score
+				end
+
+				local lvl = e:GetAttribute("Level")
+				local lvlOK = lvl and lvl >= cfg.farmLevelMin and lvl <= cfg.farmLevelMax
+				local nameOK = cfg.farmTargetName == "" or e.Name == cfg.farmTargetName
+				if lvlOK and nameOK then
+					if not bestFilteredScore or score > bestFilteredScore then
+						bestFiltered, bestFilteredScore = e, score
 					end
 				end
 			end
 		end
-		return best
+
+		return bestFiltered or bestAny
 	end
 
 	-- ═══════════════════════════ ISLAND MAP ═══════════════════════════
@@ -705,8 +717,10 @@ function Module.start(lib)
 									table.insert(sample, string.format("%s[Lv=%s HP=%s d=%s]", e.Name, tostring(lvl), tostring(hp), dist))
 								end
 								warn(string.format(
-									"[Vellum BF] no target — workspace.Enemies has %d entries. First %d: %s",
-									#kids, #sample, #sample > 0 and table.concat(sample, ", ") or "(none)"
+									"[Vellum BF] no target — workspace.Enemies has %d entries (filters: name='%s' lvl=%d..%d). First %d: %s",
+									#kids,
+									cfg.farmTargetName, cfg.farmLevelMin, cfg.farmLevelMax,
+									#sample, #sample > 0 and table.concat(sample, ", ") or "(none)"
 								))
 							end
 						end
