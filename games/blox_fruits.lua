@@ -681,10 +681,34 @@ function Module.start(lib)
 				safe(function()
 					local enemy = currentTarget
 					if not enemy or not enemy.Parent then
-						-- One-shot warn so F9 tells us when flight finds no target
+						-- One-shot diagnostic so F9 tells us *why* there's no target.
+						-- Empty container, missing Level attribute, all dead, etc.
 						if not SPY._noTargetWarned then
 							SPY._noTargetWarned = true
-							warn("[Vellum BF] flight has no target — workspace.Enemies near you is empty or out of range. Walk closer to mobs.")
+							local enemies = workspace:FindFirstChild("Enemies")
+							if not enemies then
+								warn("[Vellum BF] no target — workspace.Enemies doesn't exist. BF may use a different container.")
+							else
+								local kids = enemies:GetChildren()
+								local sample = {}
+								local hrpSelf = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+								for i = 1, math.min(5, #kids) do
+									local e = kids[i]
+									local lvl = e:GetAttribute("Level")
+									local hum = e:FindFirstChild("Humanoid")
+									local hp  = hum and hum.Health or "?"
+									local hrp = e:FindFirstChild("HumanoidRootPart")
+									local dist = "?"
+									if hrp and hrpSelf then
+										dist = string.format("%.0f", (hrp.Position - hrpSelf.Position).Magnitude)
+									end
+									table.insert(sample, string.format("%s[Lv=%s HP=%s d=%s]", e.Name, tostring(lvl), tostring(hp), dist))
+								end
+								warn(string.format(
+									"[Vellum BF] no target — workspace.Enemies has %d entries. First %d: %s",
+									#kids, #sample, #sample > 0 and table.concat(sample, ", ") or "(none)"
+								))
+							end
 						end
 						jwait(0.3); return
 					end
