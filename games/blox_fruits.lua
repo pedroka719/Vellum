@@ -640,22 +640,55 @@ function Module.start(lib)
 						jwait(0.3); return
 					end
 
-					-- No hash yet? Fire a synthetic M1 with the camera pointed
-					-- at the target. We're already hovering above it via the
-					-- flight loop, so the geometry is right — the game's combat
-					-- module processes the click, calls RegisterHit with a
-					-- fresh hash, and the spy hook captures it. Retry every
-					-- cadence cycle until it lands.
+					-- No hash yet? Trigger the combat code path directly by
+					-- firing every registered listener on Tool.Activated and
+					-- Mouse.Button1Down. The flight loop has us hovering above
+					-- the enemy so Mouse.Hit naturally points at it; the
+					-- combat handler reads that, fires RegisterHit with a
+					-- fresh hash, and the spy hook above catches it.
 					if not getHash() then
 						local cam = workspace.CurrentCamera
 						local ehrp = enemy:FindFirstChild("HumanoidRootPart")
 						if cam and ehrp then
 							cam.CFrame = CFrame.lookAt(cam.CFrame.Position, ehrp.Position)
 							RunService.Heartbeat:Wait()
+						end
+
+						-- VirtualUser:Button1Down goes through UserInputService and
+						-- never reaches BF combat listeners (Tool.Activated +
+						-- LocalPlayer.Mouse.Button1Down). Use the executor exports
+						-- getconnections / firesignal to fire those signals straight
+						-- at every registered listener.
+						local triggered = false
+						local ch = LocalPlayer.Character
+
+						local tool = ch and ch:FindFirstChildOfClass("Tool")
+						if tool then
+							if typeof(getconnections) == "function" then
+								for _, conn in ipairs(getconnections(tool.Activated)) do
+									safe(function() conn:Fire() end)
+									triggered = true
+								end
+							elseif typeof(firesignal) == "function" then
+								safe(function() firesignal(tool.Activated) end)
+								triggered = true
+							end
+						end
+
+						if typeof(getconnections) == "function" then
+							local mouse = LocalPlayer:GetMouse()
+							for _, conn in ipairs(getconnections(mouse.Button1Down)) do
+								safe(function() conn:Fire() end)
+								triggered = true
+							end
+						end
+
+						if not triggered and cam then
 							safe(function() VirtualUser:Button1Down(Vector2.new(0, 0), cam.CFrame) end)
 							task.wait(0.05)
 							safe(function() VirtualUser:Button1Up(Vector2.new(0, 0), cam.CFrame) end)
 						end
+
 						jwait(0.4)
 						return
 					end
