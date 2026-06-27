@@ -404,6 +404,10 @@ function Module.start(lib)
 	local _stopFlightFn
 
 	_stopFlightFn = function()
+		-- Cancel any active tween so toggle-off stops movement instantly
+		-- instead of letting the tween complete and fly the character to
+		-- the destination first.
+		if activeTween then pcall(function() activeTween:Cancel() end); activeTween = nil end
 		if flightConn then flightConn:Disconnect(); flightConn = nil end
 		if _hoverBP and _hoverBP.Parent then _hoverBP:Destroy() end
 		if _hoverBG and _hoverBG.Parent then _hoverBG:Destroy() end
@@ -790,7 +794,10 @@ function Module.start(lib)
 							end
 						end
 					end
-					jwait(0.15)
+					-- Throttle scan: enemies spawn on a timer (~5-10s waves).
+					-- Scanning every 0.15s allocates a `GetChildren` table
+					-- every call — unnecessary GC pressure when nothing's alive.
+					jwait(0.5)
 					return
 				end
 
