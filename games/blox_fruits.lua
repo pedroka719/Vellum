@@ -328,7 +328,20 @@ function Module.start(lib)
 	-- Raycast params builder shared across teleport helpers.
 	-- Excludes the local character and any Vellum ESP anchor parts.
 	local _tpFilterCache
-	local function _tpRaycastParams()
+	local _tpRaycastParams
+
+	-- Probe 12+ XZ offsets from altitude; return the closest clear spot.
+	-- Hardcoded island.pos Y values sit 40-190 studs below terrain AND the
+	-- exact XZ can be inside a building — we need surface detection AND an
+	-- open-air landing to avoid spawning inside terrain or walls.
+	local _findClearLanding
+
+	-- STOP & RESTART flight without forward-reference issues.
+	-- Inlined as a local so executors with broken `local function` hoisting
+	-- still work when called from tpToIsland.
+	local _stopFlightFn
+
+	_tpRaycastParams = function()
 		if not _tpFilterCache then
 			_tpFilterCache = RaycastParams.new()
 			_tpFilterCache.FilterType = Enum.RaycastFilterType.Blacklist
@@ -343,11 +356,7 @@ function Module.start(lib)
 		return _tpFilterCache
 	end
 
-	-- Probe 12+ XZ offsets from altitude; return the closest clear spot.
-	-- Hardcoded island.pos Y values sit 40-190 studs below terrain AND the
-	-- exact XZ can be inside a building — we need surface detection AND an
-	-- open-air landing to avoid spawning inside terrain or walls.
-	local function findClearLanding(xzPos, isSky)
+	_findClearLanding = function(xzPos, isSky)
 		local rp = _tpRaycastParams()
 		local startY = isSky and (xzPos.Y + 300) or (xzPos.Y + 600)
 		local length = isSky and 500 or 800
@@ -384,6 +393,17 @@ function Module.start(lib)
 		return best or Vector3.new(xzPos.X, fallbackY, xzPos.Z)
 	end
 
+	_stopFlightFn = function()
+		if flightConn then flightConn:Disconnect(); flightConn = nil end
+		if _hoverBP and _hoverBP.Parent then _hoverBP:Destroy() end
+		if _hoverBG and _hoverBG.Parent then _hoverBG:Destroy() end
+		_hoverBP = nil
+		_hoverBG = nil
+		currentTarget = nil
+		targetOriginalY = nil
+		hoverEnabled = false
+	end
+
 	local function tpToIsland(name)
 		local island = ISLAND_BY_NAME[name]
 		if not island then return false end
@@ -398,12 +418,15 @@ function Module.start(lib)
 		local restoreAutoSea1 = cfg.autoSea1
 		cfg.autoFarm = false
 		cfg.autoSea1 = false
-		stopFlight()
+		if _stopFlightFn then _stopFlightFn() end
 
 		local isSkyIsland = island.pos.Y > 500
-		local ok, dest = pcall(findClearLanding, island.pos, isSkyIsland)
+		local ok, dest
+		if _findClearLanding then
+			ok, dest = pcall(_findClearLanding, island.pos, isSkyIsland)
+		end
 		if not ok then
-			warn("[Vellum BF] findClearLanding error:", dest)
+			if dest ~= nil then warn("[Vellum BF] findClearLanding error:", dest) end
 			dest = Vector3.new(island.pos.X, island.pos.Y + 6, island.pos.Z)
 		end
 
@@ -642,16 +665,11 @@ function Module.start(lib)
 	local _hoverBP             -- BodyPosition that holds us in the air
 	local _hoverBG             -- BodyGyro to keep us upright
 
-	local function stopFlight()
-		hoverEnabled = false
-		if flightConn then flightConn:Disconnect(); flightConn = nil end
-		if _hoverBP and _hoverBP.Parent then _hoverBP:Destroy() end
-		if _hoverBG and _hoverBG.Parent then _hoverBG:Destroy() end
-		_hoverBP = nil
-		_hoverBG = nil
-		currentTarget = nil
-		targetOriginalY = nil
-	end
+	-- GATE: _stopFlightFn is defined ahead of this block (near tpToIsland)
+	-- because some executors break `local function` hoisting. Both versions
+	-- do the same thing — the table function exists only for callers that
+	-- reference it by name BEFORE the hoisting bug manifests.
+	local stopFlight = _stopFlightFn
 
 	local function startFlight()
 		if flightConn then return end
