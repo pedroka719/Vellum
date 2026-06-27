@@ -331,6 +331,13 @@ function Module.start(lib)
 	local TP_HIGH_SPEED = 1500
 	local TP_HOP_DIST = 15000
 
+	local TELEPORT_PADS = {
+		["Underwater City"] = {
+			entrance = Vector3.new(4050, 3, -1814),
+			exit = Vector3.new(61163, 12, 1819),
+		},
+	}
+
 	-- Raycast params builder shared across teleport helpers.
 	-- Excludes the local character and any Vellum ESP anchor parts.
 	local _tpFilterCache
@@ -441,9 +448,47 @@ function Module.start(lib)
 			return true
 		end
 
-		-- Single tween for nearby islands; segmented high-speed hops
-		-- for far ones so BF doesn't flag sustained movement.
+		-- Use teleporter pad for far islands that have one. Anchor+CFrame to the
+		-- entrance (short hop avoids rollback), then trigger it with an unanchored
+		-- ball so the game physics system warps us server-side to the destination.
+		local pad = TELEPORT_PADS[name]
 		local dist = (dest - hrp.Position).Magnitude
+		local padDist = pad and (pad.entrance - hrp.Position).Magnitude or math.huge
+
+		if pad and padDist < dist and padDist < TP_HOP_DIST then
+			for _, v in ipairs(ch:GetDescendants()) do
+				if v:IsA("BasePart") then v.Anchored = true end
+			end
+			hrp.CFrame = CFrame.new(pad.entrance, pad.entrance - Vector3.new(0, 0, 1))
+			task.wait(0.3)
+
+			local ball = Instance.new("Part")
+			ball.Name = "Vellum_PadTrigger"
+			ball.Size = Vector3.new(5, 5, 5)
+			ball.Shape = Enum.PartType.Ball
+			ball.Anchored = false
+			ball.CanCollide = true
+			ball.CanTouch = true
+			ball.Position = pad.entrance
+			ball.Parent = ch
+
+			for _ = 1, 30 do
+				task.wait(0.5)
+				if (hrp.Position - pad.exit).Magnitude < 500 then
+					dest = pad.exit
+					break
+				end
+			end
+
+			if ball.Parent then ball:Destroy() end
+			for _, v in ipairs(ch:GetDescendants()) do
+				if v:IsA("BasePart") then v.Anchored = false end
+			end
+		end
+
+		-- Single tween for nearby islands; segmented high-speed hops
+		-- for far ones.
+		dist = (dest - hrp.Position).Magnitude
 		local needMultiHop = dist > TP_HOP_DIST
 		local speed = needMultiHop and TP_HIGH_SPEED or TP_TWEEN_SPEED
 
