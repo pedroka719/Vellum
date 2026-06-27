@@ -677,9 +677,10 @@ function Module.start(lib)
 			if not _hoverBP or not _hoverBP.Parent then _stopFlightFn(); return end
 			if not _hoverBG or not _hoverBG.Parent then _stopFlightFn(); return end
 
-			-- Pick target each frame; seamlessly switch when one dies
-			local enemy = (currentTarget and currentTarget.Parent) and currentTarget or pickEnemy()
-			currentTarget = enemy
+			-- Follow the autoFarmLoop's target. No pickEnemy here — scanning
+			-- ALL enemies 60x/sec was the main lag source. The farm loop
+			-- calls pickEnemy itself when a target dies (~5x/sec).
+			local enemy = (currentTarget and currentTarget.Parent) and currentTarget or nil
 
 			if enemy then
 				local ehrp = enemy:FindFirstChild("HumanoidRootPart")
@@ -766,10 +767,26 @@ function Module.start(lib)
 							if dist > 3 then
 								targetOriginalY = ehrp.Position.Y
 								local hoverY = targetOriginalY + cfg.farmHeight
-								_stopFlightFn()
-								currentTarget = newEnemy  -- _stopFlightFn cleared it
-								_tweenHRPTo(hrp, Vector3.new(ehrp.Position.X, hoverY, ehrp.Position.Z))
-								startFlight()
+								local dest = Vector3.new(ehrp.Position.X, hoverY, ehrp.Position.Z)
+								-- Disable hover forces during tween instead of
+								-- destroy+recreate (was killing perf and the
+								-- unconditional startFlight() re-enabled flight
+								-- even after user toggled auto-farm off).
+								if _hoverBP and _hoverBP.Parent then
+									_hoverBP.P, _hoverBP.D = 0, 0
+									_tweenHRPTo(hrp, dest)
+									-- Re-check after the tween yield — the
+									-- Heartbeat might have killed the hover
+									-- (auto-farm toggle or anticheat).
+									if _hoverBP and _hoverBP.Parent then
+										_hoverBP.P, _hoverBP.D = 5000, 200
+										_hoverBP.Position = dest
+									end
+								else
+									-- BP already gone — just tween; the
+									-- loop guards will re-create or skip.
+									_tweenHRPTo(hrp, dest)
+								end
 							end
 						end
 					end
