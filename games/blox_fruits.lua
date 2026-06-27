@@ -321,8 +321,12 @@ function Module.start(lib)
 	-- Speed capped at 700 studs/sec to stay under the fling-fix's 750
 	-- velocity-mag throttle. 60K-stud trips (UC ↔ start area) take ~90s
 	-- which is still better than getting rolled back forever.
-	local TP_BV_SPEED = 700
-	local TP_CRUISE_Y = 80   -- modest altitude above all ground obstacles
+	-- Teleport via continuous tweens at the safe farm speed (350 studs/sec).
+	-- BodyVelocity was tried at 700 studs/sec but BF flags sustained BV
+	-- at that velocity as unnatural and rolls back + kicks the player.
+	-- Tweens generate smaller CFrame deltas per frame that the velocity
+	-- guard (which zeroes >1500 mag) ignores entirely.
+	local TP_TWEEN_SPEED = 350
 	local activeTpBV
 
 	-- Raycast params builder shared across teleport helpers.
@@ -411,8 +415,6 @@ function Module.start(lib)
 		local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
 		if not hrp then return false end
 
-		if activeTpBV and activeTpBV.Parent then activeTpBV:Destroy() end
-
 		_tpInProgress = true
 		local restoreAutoFarm = cfg.autoFarm
 		local restoreAutoSea1 = cfg.autoSea1
@@ -437,69 +439,37 @@ function Module.start(lib)
 			return true
 		end
 
-		-- Ascend above all terrain, cruise at altitude, descend to surface
-		local cruiseY = isSkyIsland and (dest.Y + 60) or TP_CRUISE_Y
+		-- Tween directly to destination in a single smooth movement.
+		-- No altitude climb — the direct path avoids terrain because
+		-- Sea 1 islands sit on open water. Speed matches the farm
+		-- loop's proven-safe tween speed.
+		local dist = (dest - hrp.Position).Magnitude
+		local duration = math.max(0.1, dist / TP_TWEEN_SPEED)
+		local destCF = CFrame.new(dest, dest - Vector3.new(0, 0, 1))
 
-		local bv = Instance.new("BodyVelocity")
-		bv.Name = "Vellum_TP_BV"
-		bv.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
-		bv.Parent = hrp
-		activeTpBV = bv
+		local tween = TweenService:Create(hrp, TweenInfo.new(duration, Enum.EasingStyle.Linear), { CFrame = destCF })
+		tween:Play()
+		tween.Completed:Wait()
 
-		task.spawn(function()
-			local t0 = os.clock()
+		-- Settle: brief BodyPosition hold so we don't slide off the landing
+		local bp = Instance.new("BodyPosition")
+		bp.Name = "Vellum_SettleBP"
+		bp.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+		bp.P = 8000
+		bp.D = 600
+		bp.Position = dest
+		bp.Parent = hrp
 
-			-- Ascend to cruise altitude
-			if hrp.Position.Y < cruiseY - 10 then
-				while bv.Parent and (os.clock() - t0) < 30 do
-					if hrp.Position.Y >= cruiseY - 5 then break end
-					bv.Velocity = Vector3.new(0, TP_BV_SPEED, 0)
-					task.wait(0.1)
-				end
-			end
+		local settleStart = os.clock()
+		while bp.Parent and os.clock() - settleStart < 3.0 do
+			task.wait(0.1)
+		end
+		if bp.Parent then bp:Destroy() end
 
-			-- Cruise at altitude toward island
-			while bv.Parent and (os.clock() - t0) < 180 do
-				local horiz = Vector3.new(hrp.Position.X - dest.X, 0, hrp.Position.Z - dest.Z)
-				if horiz.Magnitude < 100 then break end
-				bv.Velocity = (Vector3.new(dest.X, cruiseY, dest.Z) - hrp.Position).Unit * TP_BV_SPEED
-				task.wait(0.1)
-			end
-
-			-- Descend to surface
-			while bv.Parent and (os.clock() - t0) < 180 do
-				local d = (hrp.Position - dest).Magnitude
-				if d < 8 then break end
-				bv.Velocity = (dest - hrp.Position).Unit * TP_BV_SPEED
-				task.wait(0.1)
-			end
-
-			if bv.Parent then
-				bv:Destroy()
-				if activeTpBV == bv then activeTpBV = nil end
-
-				local bp = Instance.new("BodyPosition")
-				bp.Name = "Vellum_SettleBP"
-				bp.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
-				bp.P = 8000
-				bp.D = 600
-				bp.Position = dest
-				bp.Parent = hrp
-
-				local settleStart = os.clock()
-				while bp.Parent and os.clock() - settleStart < 5.0 do
-					task.wait(0.1)
-				end
-				if bp.Parent then bp:Destroy() end
-			else
-				if activeTpBV == bv then activeTpBV = nil end
-			end
-
-			task.wait(0.5)
-			_tpInProgress = false
-			cfg.autoFarm = restoreAutoFarm
-			cfg.autoSea1 = restoreAutoSea1
-		end)
+		task.wait(0.3)
+		_tpInProgress = false
+		cfg.autoFarm = restoreAutoFarm
+		cfg.autoSea1 = restoreAutoSea1
 		return true
 	end
 
