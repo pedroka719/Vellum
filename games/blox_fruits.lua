@@ -148,6 +148,60 @@ function Module.start(lib)
 		return out
 	end
 
+	-- ─── Hash extraction via getgc upvalue scan ───
+	-- The session hash is an 8-char hex string computed once by the combat
+	-- module and held as a closure upvalue. Hubs like Hoho find it by
+	-- enumerating every gc'd function with getgc(true) and grepping for
+	-- 8-hex-char string upvalues in functions sourced from combat code.
+	-- No synthetic input, no Mouse hook — just read the value where it lives.
+	local function looksLikeHash(s)
+		return type(s) == "string" and #s == 8 and s:match("^[%x][%x][%x][%x][%x][%x][%x][%x]$") ~= nil
+	end
+
+	local function extractHashFromGC()
+		if typeof(getgc) ~= "function" then return nil end
+		local hasGetUpval = typeof(debug) == "table" and typeof(debug.getupvalues) == "function"
+		local hasGetUpvalSingle = typeof(debug) == "table" and typeof(debug.getupvalue) == "function"
+		if not (hasGetUpval or hasGetUpvalSingle) then return nil end
+
+		local scanned, matched = 0, 0
+		for _, v in pairs(getgc(true)) do
+			if type(v) == "function" then
+				scanned = scanned + 1
+				-- Filter: only inspect functions sourced from BF code, not
+				-- our own or executor-injected ones. checkcaller-style filter.
+				local ok, info = pcall(debug.getinfo, v, "S")
+				if ok and info and info.source then
+					local src = info.source
+					if src:find("Combat") or src:find("Net") or src:find("RegisterHit") then
+						matched = matched + 1
+						if hasGetUpval then
+							local ok2, ups = pcall(debug.getupvalues, v)
+							if ok2 and type(ups) == "table" then
+								for _, upval in pairs(ups) do
+									if looksLikeHash(upval) then
+										return upval, scanned, matched
+									end
+								end
+							end
+						else
+							local i = 1
+							while true do
+								local ok2, _, upval = pcall(debug.getupvalue, v, i)
+								if not ok2 or upval == nil then break end
+								if looksLikeHash(upval) then
+									return upval, scanned, matched
+								end
+								i = i + 1
+							end
+						end
+					end
+				end
+			end
+		end
+		return nil, scanned, matched
+	end
+
 	-- BF rotates the hash every respawn. Clear it on the new character —
 	-- the auto-farm loop will re-capture from the next synthetic swing once
 	-- it's hovering over a target.
@@ -714,63 +768,42 @@ function Module.start(lib)
 			if cfg.autoFarm then
 				if not flightConn then startFlight() end
 
+				-- No hash yet? Try pulling it from the combat module's closure
+				-- upvalues via getgc. No synthetic click, no Mouse hook —
+				-- just read the 8-hex string where it already lives in memory.
+				if not getHash() then
+					ensureToolEquipped()
+					local h, scanned, matched = extractHashFromGC()
+					if h then
+						SPY.hash = h
+						warn(string.format(
+							"[Vellum BF] hash extracted via gc scan: %s (scanned=%d matched=%d)",
+							h, scanned or -1, matched or -1
+						))
+						task.spawn(function()
+							Toast.show({
+								title = "Hash captured",
+								body  = "Pulled directly from the combat module — full-speed farm engaged.",
+								kind  = "success", duration = 4,
+							})
+						end)
+					elseif not SPY._gcProbed then
+						SPY._gcProbed = true
+						warn(string.format(
+							"[Vellum BF] gc scan probe: getgc=%s debug.getupvalues=%s scanned=%d matched=%d hash=nil",
+							tostring(typeof(getgc) == "function"),
+							tostring(typeof(debug) == "table" and typeof(debug.getupvalues) == "function"),
+							scanned or -1, matched or -1
+						))
+					end
+					jwait(0.5)
+					continue
+				end
+
 				safe(function()
 					local enemy = currentTarget
 					if not enemy or not enemy.Parent then
 						jwait(0.3); return
-					end
-
-					-- No hash yet? Aim camera at target, set mouse hook to
-					-- substitute Mouse.* reads with enemy data, fire all three
-					-- signal paths BF combat code might listen on. The handler
-					-- runs, reads our substituted values, fires RegisterHit
-					-- normally, and the namecall spy catches the hash.
-					if not getHash() then
-						local ehrp = enemy:FindFirstChild("HumanoidRootPart")
-						if ehrp then
-							ensureToolEquipped()
-							local cam = workspace.CurrentCamera
-							if cam then
-								cam.CFrame = CFrame.lookAt(cam.CFrame.Position, ehrp.Position)
-								RunService.Heartbeat:Wait()
-							end
-
-							SPY._captureTarget = ehrp
-							SPY._captureMode = true
-
-							local tool = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Tool")
-							local fs = firesignal
-							local fired = { tool = false, mouse = false, uis = false }
-
-							if typeof(fs) == "function" then
-								if tool then
-									fired.tool = pcall(fs, tool.Activated)
-								end
-								fired.mouse = pcall(fs, LocalPlayer:GetMouse().Button1Down)
-								local fakeInput = {
-									UserInputType  = Enum.UserInputType.MouseButton1,
-									UserInputState = Enum.UserInputState.Begin,
-									KeyCode        = Enum.KeyCode.Unknown,
-									Position       = Vector3.new(0, 0, 0),
-								}
-								fired.uis = pcall(fs, UserInputService.InputBegan, fakeInput, false)
-							end
-
-							task.wait(0.15)
-							SPY._captureMode = false
-
-							-- One-shot diagnostic so F9 confirms which fires ran
-							if not SPY._fireProbed then
-								SPY._fireProbed = true
-								warn(string.format(
-									"[Vellum BF] fire probe: tool.Activated=%s mouse.Button1Down=%s UIS.InputBegan=%s hash=%s",
-									tostring(fired.tool), tostring(fired.mouse), tostring(fired.uis),
-									tostring(getHash() ~= nil)
-								))
-							end
-						end
-						jwait(0.4)
-						return
 					end
 
 					-- Hash captured — normal attack flow.
