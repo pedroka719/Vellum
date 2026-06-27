@@ -630,51 +630,70 @@ function Module.start(lib)
 		end
 	end
 
+	-- Equip the first Tool from the backpack if the character has none
+	-- in hand. BF combat scripts gate their handlers on the equipped tool
+	-- (Tool.Activated / Mouse listeners only attach once it's held), so an
+	-- unequipped fresh spawn leaves us with no signal to fire.
+	local function ensureToolEquipped()
+		local ch = LocalPlayer.Character
+		if not ch then return nil end
+		local held = ch:FindFirstChildOfClass("Tool")
+		if held then return held end
+		local hum = ch:FindFirstChildOfClass("Humanoid")
+		local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
+		if not (hum and backpack) then return nil end
+		local tool = backpack:FindFirstChildOfClass("Tool")
+		if not tool then return nil end
+		safe(function() hum:EquipTool(tool) end)
+		task.wait(0.15)
+		return ch:FindFirstChildOfClass("Tool")
+	end
+
 	local function autoFarmLoop()
 		while gui.Parent do
 			if _tpInProgress then jwait(1.0) continue end
 			if cfg.autoFarm then
 				if not flightConn then startFlight() end
 
+				-- Fire the capture probe the first time autoFarm runs without a
+				-- hash. Not gated on a target — we want F9 diagnostics even when
+				-- pickEnemy returns nil (safe zones, empty workspace.Enemies).
+				if not getHash() and not SPY._captureProbed then
+					SPY._captureProbed = true
+					local hasGC = typeof(getconnections) == "function"
+					local hasFS = typeof(firesignal) == "function"
+					local equipped = ensureToolEquipped()
+					local nTool, nMouse, nUIS = 0, 0, 0
+					if hasGC then
+						if equipped then nTool = #getconnections(equipped.Activated) end
+						local mouse = LocalPlayer:GetMouse()
+						nMouse = #getconnections(mouse.Button1Down)
+						nUIS = #getconnections(UserInputService.InputBegan)
+					end
+					warn(string.format(
+						"[Vellum BF] capture probe: getconnections=%s firesignal=%s tool=%s tool.Activated=%d mouse.Button1Down=%d UIS.InputBegan=%d",
+						tostring(hasGC), tostring(hasFS),
+						equipped and equipped.Name or "<none>",
+						nTool, nMouse, nUIS
+					))
+				end
+
 				safe(function()
-					-- Wait until flight has acquired a target
 					local enemy = currentTarget
 					if not enemy or not enemy.Parent then
+						-- One-shot warn so F9 tells us when flight finds no target
+						if not SPY._noTargetWarned then
+							SPY._noTargetWarned = true
+							warn("[Vellum BF] flight has no target — workspace.Enemies near you is empty or out of range. Walk closer to mobs.")
+						end
 						jwait(0.3); return
 					end
+					SPY._noTargetWarned = false  -- reset once we acquire something
 
-					-- No hash yet? Trigger the combat code path directly by
-					-- firing every registered listener on Tool.Activated,
-					-- Mouse.Button1Down, and UserInputService.InputBegan.
-					-- The flight loop has us hovering above the enemy so
-					-- Mouse.Hit naturally points at it; the combat handler
-					-- reads that, fires RegisterHit with a fresh hash, and
-					-- the spy hook above catches it.
+					-- No hash yet? Fire combat listeners directly. The flight loop
+					-- already hovers us above the target so Mouse.Hit points there.
 					if not getHash() then
-						-- Diagnostic: log this once per session so F9 tells
-						-- us what executor exports we have and how many
-						-- listeners are bound to each signal.
-						if not SPY._captureProbed then
-							SPY._captureProbed = true
-							local hasGC = typeof(getconnections) == "function"
-							local hasFS = typeof(firesignal) == "function"
-							local tool = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Tool")
-							local nTool, nMouse, nUIS = 0, 0, 0
-							if hasGC then
-								if tool then nTool = #getconnections(tool.Activated) end
-								local mouse = LocalPlayer:GetMouse()
-								nMouse = #getconnections(mouse.Button1Down)
-								nUIS = #getconnections(UserInputService.InputBegan)
-							end
-							warn(string.format(
-								"[Vellum BF] capture probe: getconnections=%s firesignal=%s tool=%s tool.Activated=%d mouse.Button1Down=%d UIS.InputBegan=%d",
-								tostring(hasGC), tostring(hasFS),
-								tool and tool.Name or "<none>",
-								nTool, nMouse, nUIS
-							))
-						end
-					end
-					if not getHash() then
+						ensureToolEquipped()
 						local cam = workspace.CurrentCamera
 						local ehrp = enemy:FindFirstChild("HumanoidRootPart")
 						if cam and ehrp then
