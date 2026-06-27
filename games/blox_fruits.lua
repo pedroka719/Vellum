@@ -709,40 +709,23 @@ function Module.start(lib)
 						local triggered = false
 						local ch = LocalPlayer.Character
 
-						local tool = ch and ch:FindFirstChildOfClass("Tool")
-						if tool then
-							if typeof(getconnections) == "function" then
-								for _, conn in ipairs(getconnections(tool.Activated)) do
-									safe(function() conn:Fire() end)
-									triggered = true
-								end
-							elseif typeof(firesignal) == "function" then
-								safe(function() firesignal(tool.Activated) end)
-								triggered = true
+						-- firesignal crosses Lua-state boundaries; getconnections+Fire
+						-- doesn't (Volt blocks it as "foreign state" and floods the
+						-- console with warnings). Use firesignal when available.
+						local fs = firesignal
+						if typeof(fs) == "function" then
+							local tool = ch and ch:FindFirstChildOfClass("Tool")
+							if tool then
+								if pcall(fs, tool.Activated) then triggered = true end
 							end
-						end
-
-						if typeof(getconnections) == "function" then
-							local mouse = LocalPlayer:GetMouse()
-							for _, conn in ipairs(getconnections(mouse.Button1Down)) do
-								safe(function() conn:Fire() end)
-								triggered = true
-							end
-						end
-
-						-- UserInputService.InputBegan — modern BF scripts wire
-						-- M1 here instead of Mouse.Button1Down. Firing requires
-						-- a fake InputObject; most executors accept a stub.
-						if typeof(getconnections) == "function" then
-							for _, conn in ipairs(getconnections(UserInputService.InputBegan)) do
-								safe(function()
-									conn:Fire({
-										UserInputType = Enum.UserInputType.MouseButton1,
-										UserInputState = Enum.UserInputState.Begin,
-										KeyCode = Enum.KeyCode.Unknown,
-										Position = Vector3.new(0, 0, 0),
-									}, false)
-								end)
+							if pcall(fs, LocalPlayer:GetMouse().Button1Down) then triggered = true end
+							local fakeInput = {
+								UserInputType  = Enum.UserInputType.MouseButton1,
+								UserInputState = Enum.UserInputState.Begin,
+								KeyCode        = Enum.KeyCode.Unknown,
+								Position       = Vector3.new(0, 0, 0),
+							}
+							if pcall(fs, UserInputService.InputBegan, fakeInput, false) then
 								triggered = true
 							end
 						end
