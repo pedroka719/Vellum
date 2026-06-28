@@ -428,7 +428,9 @@ function Module.start(lib)
 		-- instead of letting the tween complete and fly the character to
 		-- the destination first.
 		if activeTween then pcall(function() activeTween:Cancel() end); activeTween = nil end
-		if flightConn then flightConn:Disconnect(); flightConn = nil end
+		-- NOTE: flightConn is NEVER disconnected. The Heartbeat stays alive
+		-- for the entire session and gates on hoverEnabled + cfg.autoFarm.
+		-- Disconnect/reconnect is unreliable across executor environments.
 
 		-- Aggressively disable and remove all Vellum force fields.
 		-- Some executors block :Destroy() but allow property writes and
@@ -698,20 +700,15 @@ function Module.start(lib)
 	-- _bringBPs declared above before _stopFlightFn
 
 	local function startFlight()
-		if flightConn then return end
 		if _tpInProgress then return end  -- don't start during teleport
-		hoverEnabled = true
 
-		-- Clean sweep: destroy any orphan Vellum_ BPs still parented from
-		-- a prior run that _stopFlightFn() only partially cleaned up.
-		-- Without this, duplicate BodyPositions fight each other for HRP
-		-- control and the hover drifts/floats unpredictably.
+		-- Clean sweep: destroy any orphan Vellum_ BPs on HRP that
+		-- _stopFlightFn() may have left parented (some executors block
+		-- Destroy/Parent=nil). Duplicate BodyPositions fight each other
+		-- for HRP control — hover drifts or locks up.
 		local ch = LocalPlayer.Character
 		local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
-		if not hrp then
-			_stopFlightFn()
-			return
-		end
+		if not hrp then return end
 		for _, child in ipairs(hrp:GetChildren()) do
 			if child.Name:find("^Vellum_") then
 				if child:IsA("BodyGyro") then
@@ -724,60 +721,73 @@ function Module.start(lib)
 			end
 		end
 
-		_hoverBP = Instance.new("BodyPosition")
-		_hoverBP.Name = "Vellum_HoverBP"
-		_hoverBP.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
-		_hoverBP.P = 600    -- 5000 was applying insane force (5000N/stud) that
-		_hoverBP.D = 80     -- the physics engine had to resolve against every
-		                    -- enemy collision body — dropping 60→12 fps.
-		_hoverBP.Position = hrp.Position
-		_hoverBP.Parent = hrp
+		-- Create/recreate BodyPosition if missing (destroyed by _stopFlightFn).
+		if not _hoverBP or not _hoverBP.Parent then
+			_hoverBP = Instance.new("BodyPosition")
+			_hoverBP.Name = "Vellum_HoverBP"
+			_hoverBP.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+			_hoverBP.P = 600    -- 5000 was applying insane force (5000N/stud) that
+			_hoverBP.D = 80     -- the physics engine had to resolve against every
+			                    -- enemy collision body — dropping 60→12 fps.
+			_hoverBP.Position = hrp.Position
+			_hoverBP.Parent = hrp
+		end
 
-		_hoverBG = Instance.new("BodyGyro")
-		_hoverBG.Name = "Vellum_HoverBG"
-		_hoverBG.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
-		_hoverBG.P = 1000
-		_hoverBG.D = 300
-		_hoverBG.CFrame = hrp.CFrame
-		_hoverBG.Parent = hrp
+		-- Create/recreate BodyGyro if missing.
+		if not _hoverBG or not _hoverBG.Parent then
+			_hoverBG = Instance.new("BodyGyro")
+			_hoverBG.Name = "Vellum_HoverBG"
+			_hoverBG.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
+			_hoverBG.P = 1000
+			_hoverBG.D = 300
+			_hoverBG.CFrame = hrp.CFrame
+			_hoverBG.Parent = hrp
+		end
 
-		flightConn = RunService.Heartbeat:Connect(function()
-			if not (hoverEnabled and cfg.autoFarm) then _stopFlightFn(); return end
-			if _tpInProgress then _stopFlightFn(); return end
+		-- Connect Heartbeat ONCE per session. Never disconnected/reconnected
+		-- (see _stopFlightFn — it only cleans BPs, not the signal).
+		if not flightConn then
+			flightConn = RunService.Heartbeat:Connect(function()
+				-- NEVER self-destruct. Just return early when conditions
+				-- aren't met. The connection lives for the whole session.
+				if not (hoverEnabled and cfg.autoFarm) then return end
+				if _tpInProgress then return end
 
-			local ch2 = LocalPlayer.Character
-			local hrp2 = ch2 and ch2:FindFirstChild("HumanoidRootPart")
-			if not hrp2 then return end
-			if not _hoverBP or not _hoverBP.Parent then _stopFlightFn(); return end
-			if not _hoverBG or not _hoverBG.Parent then _stopFlightFn(); return end
+				local ch2 = LocalPlayer.Character
+				local hrp2 = ch2 and ch2:FindFirstChild("HumanoidRootPart")
+				if not hrp2 then return end
+				if not _hoverBP or not _hoverBP.Parent then return end
+				if not _hoverBG or not _hoverBG.Parent then return end
 
-			-- Follow the autoFarmLoop's target. No pickEnemy here — scanning
-			-- ALL enemies 60x/sec was the main lag source. The farm loop
-			-- calls pickEnemy itself when a target dies (~5x/sec).
-			local enemy = (currentTarget and currentTarget.Parent) and currentTarget or nil
+				-- Follow the autoFarmLoop's target. No pickEnemy here — scanning
+				-- ALL enemies 60x/sec was the main lag source. The farm loop
+				-- calls pickEnemy itself when a target dies (~5x/sec).
+				local enemy = (currentTarget and currentTarget.Parent) and currentTarget or nil
 
-			if enemy then
-				local ehrp = enemy:FindFirstChild("HumanoidRootPart")
-				if ehrp then
-					if not targetOriginalY then
-						targetOriginalY = ehrp.Position.Y
+				if enemy then
+					local ehrp = enemy:FindFirstChild("HumanoidRootPart")
+					if ehrp then
+						if not targetOriginalY then
+							targetOriginalY = ehrp.Position.Y
+						end
+						local hoverY = targetOriginalY + cfg.farmHeight
+						lastHoldY = hoverY
+						_hoverBP.Position = Vector3.new(ehrp.Position.X, hoverY, ehrp.Position.Z)
+
+						-- Aggressive range uses enemy CFrame — still technically
+						-- detectable by BF. Left as user opt-in.
+						if cfg.aggressiveRange then
+							ehrp.CFrame = CFrame.new(hrp2.Position.X, targetOriginalY, hrp2.Position.Z)
+						end
 					end
-					local hoverY = targetOriginalY + cfg.farmHeight
-					lastHoldY = hoverY
-					_hoverBP.Position = Vector3.new(ehrp.Position.X, hoverY, ehrp.Position.Z)
-
-					-- Aggressive range uses enemy CFrame — still technically
-					-- detectable by BF. Left as user opt-in.
-					if cfg.aggressiveRange then
-						ehrp.CFrame = CFrame.new(hrp2.Position.X, targetOriginalY, hrp2.Position.Z)
-					end
+				else
+					targetOriginalY = nil
+					local holdY = lastHoldY or hrp2.Position.Y
+					_hoverBP.Position = Vector3.new(hrp2.Position.X, holdY, hrp2.Position.Z)
 				end
-			else
-				targetOriginalY = nil
-				local holdY = lastHoldY or hrp2.Position.Y
-				_hoverBP.Position = Vector3.new(hrp2.Position.X, holdY, hrp2.Position.Z)
-			end
-		end)
+			end)
+		end
+		hoverEnabled = true
 	end
 
 	local function autoSea1Loop()
@@ -881,7 +891,7 @@ function Module.start(lib)
 				continue
 			end
 
-			if not flightConn then safe(startFlight) end
+			if not flightConn or not _hoverBP or not _hoverBP.Parent then safe(startFlight) end
 			safe(ensureToolEquipped)
 
 			safe(function()
