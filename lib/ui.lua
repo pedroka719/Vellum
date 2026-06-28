@@ -174,45 +174,6 @@ function UI.mount(opts)
 		root.Visible = not root.Visible
 	end)
 
-	-- Parented to gui (not root) so it survives root.Visible=false.
-	local restoreBtn = Instance.new("TextButton", gui)
-	restoreBtn.Name = "RestoreBtn"
-	restoreBtn.Size = UDim2.fromOffset(52, 22)
-	restoreBtn.Visible = false
-	restoreBtn.BackgroundTransparency = 1; restoreBtn.Text = ""
-	restoreBtn.AutoButtonColor = false
-
-	local restoreLbl = Instance.new("TextLabel", restoreBtn)
-	restoreLbl.Size = UDim2.new(1, 0, 1, 0); restoreLbl.ZIndex = 3
-	restoreLbl.BackgroundTransparency = 0.25
-	Theme.bind(restoreLbl, "BackgroundColor3", "panel")
-	restoreLbl.Font = Enum.Font.GothamBold; restoreLbl.TextSize = 11
-	Theme.bind(restoreLbl, "TextColor3", "accent")
-	restoreLbl.Text = "V"
-	local rc = Instance.new("UICorner", restoreLbl)
-	rc.CornerRadius = UDim.new(0, 6)
-	local rs = Instance.new("UIStroke", restoreLbl)
-	Theme.bind(rs, "Color", "accent"); rs.Thickness = 1.2
-
-	local function syncRestorePos()
-		local rootAbs = root.AbsolutePosition
-		local rootSz  = root.AbsoluteSize
-		restoreBtn.Position = UDim2.fromOffset(rootAbs.X, rootAbs.Y + rootSz.Y + 8)
-	end
-
-	restoreLbl.MouseButton1Click:Connect(function()
-		root.Visible = true
-	end)
-
-	root:GetPropertyChangedSignal("Visible"):Connect(function()
-		restoreBtn.Visible = not root.Visible
-		if root.Visible then
-			-- next render frame will have correct AbsolutePosition
-			task.wait()
-			syncRestorePos()
-		end
-	end)
-
 	-- ─── sidebar (flat list, accent strip marks active) ───
 	local sidebar = Instance.new("Frame", root)
 	sidebar.Size = UDim2.new(0, 108, 1, -76); sidebar.Position = UDim2.fromOffset(12, 64)
