@@ -62,7 +62,7 @@ function Module.start(lib)
 		-- farm
 		autoFarm = false,
 		farmHeight = 10,            -- studs above target (safe farm)
-						attackCadence = 0.25,       -- sec between RegisterAttack/Hit pairs
+		attackCadence = 0.25,       -- sec between RegisterAttack/Hit pairs
 		damageMultiplier = 1.0,     -- 1.0 = always finisher hits
 		farmLevelMin = 0,           -- only attack enemies within range
 		farmLevelMax = 9999,
@@ -71,8 +71,16 @@ function Module.start(lib)
 		mobBring = false,           -- pull all nearby enemies toward player
 		mobBringRadius = 50,        -- max studs to pull enemies from
 
-		-- auto sea progression
-		autoSea1 = false,            -- pick best quest for level + TP + accept + farm
+		-- auto farm level (replaces autoSea1)
+		autoFarmLevel = false,       -- full quest lifecycle (accept → farm → detect done → re-accept)
+		autoSea1 = false,            -- kept for backward compat, driven by autoFarmLevel
+
+		-- weapon selection
+		selectedWeapon = "",         -- name of weapon to auto-equip ("" = first available)
+
+		-- ability rotation
+		abilitySlots = { Z = false, X = false, C = false, V = false, F = false },
+		abilityCadence = 2.0,        -- sec between ability activations
 
 		-- island ESP
 		espIslands = true,           -- billboard names over each island
@@ -123,7 +131,7 @@ function Module.start(lib)
 	local _tpInProgress = false
 
 	-- Master alive flag. Set to false when the GUI is closed so all spawned
-	-- loops (autoFarm, autoSea1, autoStats, progress) exit cleanly instead
+	-- loops (autoFarm, autoFarmLevel, autoStats, progress) exit cleanly instead
 	-- of running forever. Without this the loops depended on gui.Parent,
 	-- which kills them when the ScreenGui is destroyed — but that means
 	-- toggling auto-farm back ON after closing/reopening the GUI does
@@ -507,9 +515,9 @@ function Module.start(lib)
 
 		_tpInProgress = true
 		local restoreAutoFarm = cfg.autoFarm
-		local restoreAutoSea1 = cfg.autoSea1
+		local restoreAutoFL   = cfg.autoFarmLevel
 		cfg.autoFarm = false
-		cfg.autoSea1 = false
+		cfg.autoFarmLevel = false
 		_stopFlightFn()
 
 		-- Portal-fronted destination: tween to the pad, fire requestEntrance,
@@ -529,50 +537,51 @@ function Module.start(lib)
 		task.wait(0.3)
 		_tpInProgress = false
 		cfg.autoFarm = restoreAutoFarm
-		cfg.autoSea1 = restoreAutoSea1
+		cfg.autoFarmLevel = restoreAutoFL
 		return true
 	end
 
 	-- ═══════════════════════════ QUEST ATLAS ═══════════════════════════
-	-- Sea 1 quest progression. Each entry: level range, the island where
-	-- the quest giver lives, the questId to fire via CommF_:StartQuest,
-	-- the tier string, and the mob name(s) the quest credits.
-	--
-	-- IDs are community-documented BF quest names. If any fails (server
-	-- returns nil / no quest accepts), the spy buffer will log it and we
-	-- fix that single row. Captured for-real so-far: BanditQuest1 tier 1.
+	-- Sea 1 quest progression with taskCount from the live Quests module.
+	-- Faction-Specific note: BanditQuest1 works on Pirate Starter,
+	-- MarineQuest works on Marine Starter. Both give the same XP.
+	-- If a questId fires and the server ignores it (no-accept), we log it
+	-- and the user adjusts the row.
 	local SEA1_QUESTS = {
-		{ lvlMin = 1,   lvlMax = 9,   island = "Pirate Starter",  questId = "BanditQuest1",  tier = "1", mob = "Bandit"       },
-		{ lvlMin = 10,  lvlMax = 14,  island = "Pirate Starter",  questId = "BanditQuest1",  tier = "2", mob = "Brute"        },
-		{ lvlMin = 15,  lvlMax = 29,  island = "Jungle",          questId = "JungleQuest",   tier = "1", mob = "Monkey"       },
-		{ lvlMin = 30,  lvlMax = 39,  island = "Jungle",          questId = "JungleQuest",   tier = "2", mob = "Gorilla"      },
-		{ lvlMin = 40,  lvlMax = 59,  island = "Pirate Village",  questId = "BuggyQuest1",   tier = "1", mob = "Pirate"       },
-		{ lvlMin = 60,  lvlMax = 74,  island = "Desert",          questId = "DesertQuest",   tier = "1", mob = "Desert Bandit" },
-		{ lvlMin = 75,  lvlMax = 89,  island = "Desert",          questId = "DesertQuest",   tier = "2", mob = "Desert Officer"},
-		{ lvlMin = 90,  lvlMax = 99,  island = "Frozen Village",  questId = "SnowQuest",     tier = "1", mob = "Snow Bandit"  },
-		{ lvlMin = 100, lvlMax = 119, island = "Frozen Village",  questId = "SnowQuest",     tier = "2", mob = "Snowman"      },
-		{ lvlMin = 120, lvlMax = 149, island = "Marine Fortress", questId = "MarineQuest2",  tier = "1", mob = "Chief Petty Officer" },
-		{ lvlMin = 150, lvlMax = 174, island = "Skylands",        questId = "SkyQuest",      tier = "1", mob = "Sky Bandit"   },
-		{ lvlMin = 175, lvlMax = 189, island = "Skylands",        questId = "SkyQuest",      tier = "2", mob = "Dark Master"  },
-		{ lvlMin = 190, lvlMax = 249, island = "Skylands",        questId = "SkyQuest",      tier = "3", mob = "Prisoner"     },
-		{ lvlMin = 250, lvlMax = 274, island = "Prison",          questId = "PrisonerQuest", tier = "1", mob = "Prisoner"     },
-		{ lvlMin = 275, lvlMax = 299, island = "Prison",          questId = "PrisonerQuest", tier = "2", mob = "Dangerous Prisoner" },
-		{ lvlMin = 300, lvlMax = 324, island = "Prison",          questId = "PrisonerQuest", tier = "3", mob = "Toga Warrior" },
-		{ lvlMin = 325, lvlMax = 374, island = "Magma Village",   questId = "MagmaQuest",    tier = "1", mob = "Magma Ninja"  },
-		{ lvlMin = 375, lvlMax = 449, island = "Magma Village",   questId = "MagmaQuest",    tier = "2", mob = "Military Soldier" },
-		{ lvlMin = 450, lvlMax = 524, island = "Underwater City", questId = "FishmanQuest",  tier = "1", mob = "Fishman Warrior" },
-		{ lvlMin = 525, lvlMax = 624, island = "Underwater City", questId = "FishmanQuest",  tier = "2", mob = "Fishman Commando" },
-		{ lvlMin = 625, lvlMax = 699, island = "Fountain City",   questId = "SkyExp1Quest",  tier = "1", mob = "God's Guard"  },
-		{ lvlMin = 700, lvlMax = 874, island = "Fountain City",   questId = "FountainQuest", tier = "1", mob = "Marine Lieutenant" },
-		{ lvlMin = 875, lvlMax = 999, island = "Fountain City",   questId = "FountainQuest", tier = "2", mob = "Marine Captain" },
+		{ lvlMin = 1,   lvlMax = 9,   island = "Pirate Starter",  questId = "BanditQuest1",  tier = 1, mob = "Bandit",          taskCount = 5 },
+		{ lvlMin = 1,   lvlMax = 9,   island = "Marine Starter",  questId = "MarineQuest",   tier = 1, mob = "Trainee",         taskCount = 5 },
+		{ lvlMin = 10,  lvlMax = 14,  island = "Middle Town",     questId = "MarineQuest",   tier = 1, mob = "Trainee",         taskCount = 5 },
+		{ lvlMin = 15,  lvlMax = 19,  island = "Jungle",          questId = "JungleQuest",   tier = 1, mob = "Monkey",          taskCount = 6 },
+		{ lvlMin = 20,  lvlMax = 29,  island = "Jungle",          questId = "JungleQuest",   tier = 2, mob = "Gorilla",         taskCount = 8 },
+		{ lvlMin = 30,  lvlMax = 39,  island = "Pirate Village",  questId = "BuggyQuest1",   tier = 1, mob = "Pirate",          taskCount = 8 },
+		{ lvlMin = 40,  lvlMax = 59,  island = "Pirate Village",  questId = "BuggyQuest1",   tier = 2, mob = "Brute",           taskCount = 8 },
+		{ lvlMin = 60,  lvlMax = 74,  island = "Desert",          questId = "DesertQuest",   tier = 1, mob = "Desert Bandit",   taskCount = 8 },
+		{ lvlMin = 75,  lvlMax = 89,  island = "Desert",          questId = "DesertQuest",   tier = 2, mob = "Desert Officer",  taskCount = 6 },
+		{ lvlMin = 90,  lvlMax = 99,  island = "Frozen Village",  questId = "SnowQuest",     tier = 1, mob = "Snow Bandit",     taskCount = 7 },
+		{ lvlMin = 100, lvlMax = 119, island = "Frozen Village",  questId = "SnowQuest",     tier = 2, mob = "Snowman",         taskCount = 8 },
+		{ lvlMin = 120, lvlMax = 149, island = "Marine Fortress", questId = "MarineQuest2",  tier = 1, mob = "Chief Petty Officer", taskCount = 8 },
+		{ lvlMin = 150, lvlMax = 174, island = "Skylands",        questId = "SkyQuest",      tier = 1, mob = "Sky Bandit",      taskCount = 7 },
+		{ lvlMin = 175, lvlMax = 189, island = "Skylands",        questId = "SkyQuest",      tier = 2, mob = "Dark Master",     taskCount = 8 },
+		{ lvlMin = 190, lvlMax = 219, island = "Skylands",        questId = "PrisonerQuest", tier = 1, mob = "Prisoner",        taskCount = 8 },
+		{ lvlMin = 220, lvlMax = 249, island = "Skylands",        questId = "ImpelQuest",    tier = 1, mob = "Warden",          taskCount = 1 },
+		{ lvlMin = 250, lvlMax = 274, island = "Prison",          questId = "ColosseumQuest",tier = 1, mob = "Toga Warrior",    taskCount = 7 },
+		{ lvlMin = 275, lvlMax = 324, island = "Prison",          questId = "ColosseumQuest",tier = 2, mob = "Gladiator",       taskCount = 8 },
+		{ lvlMin = 325, lvlMax = 374, island = "Magma Village",   questId = "MagmaQuest",    tier = 1, mob = "Military Soldier",taskCount = 7 },
+		{ lvlMin = 375, lvlMax = 449, island = "Magma Village",   questId = "MagmaQuest",    tier = 2, mob = "Military Spy",    taskCount = 8 },
+		{ lvlMin = 450, lvlMax = 524, island = "Underwater City", questId = "FishmanQuest",  tier = 1, mob = "Fishman Warrior", taskCount = 8 },
+		{ lvlMin = 525, lvlMax = 624, island = "Underwater City", questId = "FishmanQuest",  tier = 2, mob = "Fishman Commando",taskCount = 7 },
+		{ lvlMin = 625, lvlMax = 749, island = "Fountain City",   questId = "FountainQuest", tier = 1, mob = "Galley Pirate",   taskCount = 8 },
+		{ lvlMin = 750, lvlMax = 999, island = "Fountain City",   questId = "FountainQuest", tier = 2, mob = "Galley Captain",  taskCount = 9 },
 	}
 
 	-- Picks the highest-level-fit quest for a given player level.
+	-- Iterates from end so higher-level entries win (later rows = higher tier).
 	local function pickQuest(level)
+		local best
 		for _, q in ipairs(SEA1_QUESTS) do
-			if level >= q.lvlMin and level <= q.lvlMax then return q end
+			if level >= q.lvlMin and level <= q.lvlMax then best = q end
 		end
-		return nil
+		return best
 	end
 
 	-- Are we close enough to the island to consider ourselves "there"?
@@ -590,61 +599,58 @@ function Module.start(lib)
 		return math.sqrt(dx * dx + dz * dz) < 350
 	end
 
-	-- ═══════════════════════════ AUTO SEA 1 ═══════════════════════════
-	-- Single-toggle progression. Each tick:
-	--   1. Look up the best quest for the current Data.Level
-	--   2. If not on that island, TP there
-	--   3. If no quest accepted, fire StartQuest
-	--   4. Set the manual farm filters to match the quest mob + level range
-	--   5. Existing flight/attack loop handles the killing
-	--
-	-- The script doesn't try to confirm quest-accepted from a server reply
-	-- (the verb is fire-and-forget). We keep a soft state of "last accepted"
-	-- and re-accept if the level outgrows the previous quest's range.
-	local autoSeaState = { lastQuestKey = nil }
+	-- ═══════════════════════════ QUEST LIFECYCLE ═══════════════════════════
+	-- Tracks the active quest, kill progress toward completion, and when
+	-- the task count is met the autoFarmLevelLoop advances to the next tier.
+	-- Kill counting happens inside autoFarmLoop (death event).
 
-	local function autoSea1Tick()
-		local data = LocalPlayer:FindFirstChild("Data")
-		local levelVal = data and data:FindFirstChild("Level")
-		if not levelVal then return end  -- Data not populated yet; try again next tick
-		local level = levelVal.Value
-		local quest = pickQuest(level)
-		if not quest then
-			-- Level past Sea 1's farmable range — turn off + notify
-			cfg.autoSea1 = false
-			Toast.show({
-				title = "Sea 1 complete",
-				body  = "Level " .. level .. " is past the Sea 1 quest atlas. Switch to Sea 2 (coming soon).",
-				kind  = "success", duration = 12,
-			})
-			return
+	-- Current quest state. Reset when quest completes or level changes.
+	local Q = {
+		current   = nil,       -- the active SEA1_QUESTS row
+		kills     = 0,         -- kills of the quest mob this cycle
+		accepted  = false,     -- whether we've fired StartQuest this cycle
+		lastLevel = 0,         -- Data.Level on last tick
+		key       = nil,       -- "questId|tier" composite key
+	}
+
+	-- Accept a quest via CommF_:StartQuest and reset the kill counter.
+	local function acceptQuest(q)
+		if not q then return end
+		local key = q.questId .. "|" .. tostring(q.tier)
+		if Q.key == key and Q.accepted then return end  -- already accepted
+
+		safe(function() R.CommF_:InvokeServer("StartQuest", q.questId, q.tier) end)
+		Q.current  = q
+		Q.kills    = 0
+		Q.accepted = true
+		Q.key      = key
+		Toast.show({
+			title = "Quest accepted",
+			body  = q.mob .. " x" .. q.taskCount .. " (Lv " .. q.lvlMin .. "-" .. q.lvlMax .. ")",
+			kind  = "info", duration = 4,
+			key   = "q:" .. key,
+		})
+	end
+
+	-- Drive farm filters to match the quest target.
+	local function applyQuestFilters(q)
+		cfg.farmTargetName = q.mob
+		cfg.farmLevelMin   = q.lvlMin
+		cfg.farmLevelMax   = q.lvlMax + 5
+	end
+
+	-- Callback invoked from autoFarmLoop on each death. If the kill matches
+	-- the quest mob, increment the counter.
+	local function recordQuestKill(enemyName)
+		if not Q.current then return end
+		if enemyName == Q.current.mob then
+			Q.kills = Q.kills + 1
 		end
+	end
 
-		-- TP to the quest's island if we aren't there yet
-		if not atIsland(quest.island) then
-			tpToIsland(quest.island)
-			task.wait(0.8)  -- let streaming catch up
-			autoSeaState.lastQuestKey = nil  -- re-accept after TP
-			return
-		end
-
-		-- Accept quest if we haven't yet (or moved to a new quest tier)
-		local key = quest.questId .. "|" .. quest.tier
-		if autoSeaState.lastQuestKey ~= key then
-			safe(function() R.CommF_:InvokeServer("StartQuest", quest.questId, quest.tier) end)
-			autoSeaState.lastQuestKey = key
-			Toast.show({
-				title = "Quest accepted",
-				body  = quest.mob .. " (Lv " .. quest.lvlMin .. "-" .. quest.lvlMax .. ")",
-				kind  = "info", duration = 4,
-				key   = "quest:" .. key,
-			})
-		end
-
-		-- Drive the existing farm filters
-		cfg.farmTargetName = quest.mob
-		cfg.farmLevelMin   = quest.lvlMin
-		cfg.farmLevelMax   = quest.lvlMax + 5  -- small margin for tier overlap
+	-- Returns true if the quest kill target has been met.
+	local function questIsComplete()
+		return Q.current and Q.kills >= Q.current.taskCount
 	end
 
 	-- ═══════════════════════════ ISLAND ESP ═══════════════════════════
@@ -790,35 +796,182 @@ function Module.start(lib)
 		hoverEnabled = true
 	end
 
-	local function autoSea1Loop()
+	local function autoFarmLevelLoop()
 		while _running do
 			if _tpInProgress then jwait(1.0) continue end
-			if cfg.autoSea1 then
-				safe(autoSea1Tick)
-				-- auto-Sea-1 implies auto-farm; flip it on if user forgot
-				cfg.autoFarm = true
+			if not cfg.autoFarmLevel then
+				jwait(1.0)
+				continue
 			end
-			jwait(3.0)  -- check every 3s; no need to thrash quest logic
+
+			-- auto-farm must be on for kills to happen
+			cfg.autoFarm = true
+
+			local data = LocalPlayer:FindFirstChild("Data")
+			local levelVal = data and data:FindFirstChild("Level")
+			if not levelVal then jwait(3.0); continue end
+			local level = levelVal.Value
+
+			-- Level-up detection: if level crossed into a new quest bracket,
+			-- reset state so we pick the next tier on this tick.
+			if level ~= Q.lastLevel then
+				Q.lastLevel = level
+				Q.accepted = false
+			end
+
+			local quest = pickQuest(level)
+			if not quest then
+				-- Level past the quest atlas. Auto-farm still runs (simple kill mode).
+				if Q.current then
+					Toast.show({
+						title = "Sea 1 quests exhausted",
+						body  = "Level " .. level .. " — continuing in simple kill mode.",
+						kind  = "info", duration = 6,
+						key   = "q:exhausted",
+					})
+					Q.current = nil
+					Q.accepted = false
+					Q.key = nil
+				end
+				jwait(5.0)
+				continue
+			end
+
+			-- Quest complete: advance to next row (pickQuest will return the next
+			-- row for the same level range, or the next tier).
+			if questIsComplete() then
+				Toast.show({
+					title = "Quest complete",
+					body  = quest.mob .. " done — moving to next tier.",
+					kind  = "info", duration = 3,
+					key   = "q:done",
+				})
+				Q.accepted = false
+				Q.kills = 0
+				Q.current = nil
+				Q.key = nil
+				-- Next tick will pick the next tier (same level → higher tier quest)
+				jwait(0.5)
+				continue
+			end
+
+			-- TP to the quest's island if we aren't there yet
+			if not atIsland(quest.island) then
+				tpToIsland(quest.island)
+				task.wait(0.8)
+				Q.accepted = false
+				continue
+			end
+
+			-- Accept quest if not yet accepted this cycle
+			if not Q.accepted or Q.key ~= quest.questId .. "|" .. tostring(quest.tier) then
+				acceptQuest(quest)
+			end
+
+			applyQuestFilters(quest)
+			jwait(3.0)
 		end
 	end
 
-	-- Equip the first Tool from the backpack if the character has none
-	-- in hand. BF combat scripts gate their handlers on the equipped tool
-	-- (Tool.Activated / Mouse listeners only attach once it's held), so an
-	-- unequipped fresh spawn leaves us with no signal to fire.
-	local function ensureToolEquipped()
+	-- Equip a Tool from the backpack. If cfg.selectedWeapon is set and matches
+	-- a backpack tool, equip that one. Otherwise fall back to the first tool.
+	-- Returns the equipped Tool or nil.
+	local function ensureWeaponEquipped()
 		local ch = LocalPlayer.Character
 		if not ch then return nil end
-		local held = ch:FindFirstChildOfClass("Tool")
-		if held then return held end
 		local hum = ch:FindFirstChildOfClass("Humanoid")
 		local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
-		if not (hum and backpack) then return nil end
+		if not hum then return nil end
+
+		-- Check what's already in-hand
+		local held = ch:FindFirstChildOfClass("Tool")
+		if held then
+			-- Already holding the selected weapon
+			if cfg.selectedWeapon ~= "" and held.Name == cfg.selectedWeapon then
+				return held
+			end
+			return held
+		end
+
+		if not backpack then return nil end
+
+		-- Try selected weapon first
+		if cfg.selectedWeapon ~= "" then
+			local tool = backpack:FindFirstChild(cfg.selectedWeapon)
+			if tool and tool:IsA("Tool") then
+				safe(function() hum:EquipTool(tool) end)
+				task.wait(0.15)
+				return ch:FindFirstChildOfClass("Tool")
+			end
+		end
+
+		-- Fallback: first tool
 		local tool = backpack:FindFirstChildOfClass("Tool")
 		if not tool then return nil end
 		safe(function() hum:EquipTool(tool) end)
 		task.wait(0.15)
 		return ch:FindFirstChildOfClass("Tool")
+	end
+
+	-- Legacy alias used by autoFarmLoop
+	local ensureToolEquipped = ensureWeaponEquipped
+
+	-- Return a table of available weapon names from the backpack for the UI dropdown.
+	local function getWeaponOptions()
+		local names = {}
+		local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
+		if backpack then
+			for _, child in ipairs(backpack:GetChildren()) do
+				if child:IsA("Tool") then
+					table.insert(names, child.Name)
+				end
+			end
+		end
+		table.sort(names)
+		return names
+	end
+
+	-- ═══════════════════════════ ABILITY ROTATION ═══════════════════════════
+	-- Fires the Activated event on the currently equipped tool at a configurable
+	-- cadence for each enabled ability slot (Z, X, C, V, F).
+	-- Uses firesignal(Tool.Activated) which triggers the game's client-side
+	-- combat handler the same way pressing the key would.
+	local SLOT_NAMES = { "Z", "X", "C", "V", "F" }
+
+	local function abilityRotationTick()
+		if not cfg.autoFarm then return end  -- only use abilities while farming
+		local ch = LocalPlayer.Character
+		local tool = ch and ch:FindFirstChildOfClass("Tool")
+		if not tool then return end
+
+		for _, slot in ipairs(SLOT_NAMES) do
+			if cfg.abilitySlots[slot] then
+				safe(function()
+					local ev = tool:FindFirstChild(slot)
+					if ev and ev:IsA("RemoteEvent") then
+						ev:FireServer()
+					elseif ev and ev:IsA("BindableEvent") then
+						ev:Fire()
+					end
+				end)
+				task.wait(0.05)  -- small gap between slot activations
+			end
+		end
+	end
+
+	local function abilityRotationLoop()
+		while _running do
+			local anyOn = false
+			for _, slot in ipairs(SLOT_NAMES) do
+				if cfg.abilitySlots[slot] then anyOn = true; break end
+			end
+			if anyOn then
+				safe(abilityRotationTick)
+				jwait(cfg.abilityCadence)
+			else
+				jwait(1.0)
+			end
+		end
 	end
 
 	-- Diagnostics: toggle via executor:  getgenv().VellumBF.diag = true
@@ -976,6 +1129,7 @@ function Module.start(lib)
 				if (enemy and not enemy.Parent) or (hum and hum.Health <= 0) then
 					stats.sessionKills = stats.sessionKills + 1
 					dbg("kill", enemy.Name)
+					recordQuestKill(enemy.Name)
 					currentTarget = nil
 					targetOriginalY = nil
 				end
@@ -1052,28 +1206,47 @@ function Module.start(lib)
 
 	Toast.init({ theme = Theme, enabled = function() return cfg.notifyInGame end })
 
-	-- ─── FARM TAB ───
+	-- ─── FARM LEVEL TAB ───
 	local farm = ui.newPage("farm")
-	ui.sectionLabel(farm, "AUTO FARM")
-	ui.toggleRow(farm, "Auto-farm enemies",
-		function() return cfg.autoFarm end,
+	ui.sectionLabel(farm, "AUTO FARM LEVEL")
+	ui.toggleRow(farm, "Auto Farm Level (quest + kill cycle)",
+		function() return cfg.autoFarmLevel end,
 		function(v)
-			cfg.autoFarm = v
+			cfg.autoFarmLevel = v
 			if v then
+				cfg.autoFarm = true
 				-- Full restart: tear down any stale flight state first
-				-- (orphan BPs, zombie Heartbeat connections) so the fresh
-				-- startFlight() creates a clean hover from scratch.
 				safe(_stopFlightFn)
-				safe(ensureToolEquipped)
+				safe(ensureWeaponEquipped)
 				safe(startFlight)
 				if not getHash() then
 					ensureHash()
 					Toast.show({
 						title = "Hash auto-generated",
-						body  = "Session token generated and registered — auto-farm running.",
+						body  = "Quest lifecycle loop engaged.",
 						kind  = "success", duration = 4,
 					})
 				end
+			end
+		end)
+	ui.toggleRow(farm, "Simple Kill Mode (no quests)",
+		function() return cfg.autoFarm and not cfg.autoFarmLevel end,
+		function(v)
+			if v then
+				cfg.autoFarm = true
+				cfg.autoFarmLevel = false
+				safe(ensureWeaponEquipped)
+				safe(startFlight)
+				if not getHash() then
+					ensureHash()
+					Toast.show({
+						title = "Hash auto-generated",
+						body  = "Simple kill mode — hash registered.",
+						kind  = "success", duration = 4,
+					})
+				end
+			else
+				cfg.autoFarm = false
 			end
 		end)
 	ui.intervalRow(farm, "Attack cadence (sec)",
@@ -1095,6 +1268,38 @@ function Module.start(lib)
 		function(v) cfg.mobBringRadius = v end,
 		{ 20, 35, 50, 75, 100, 150 })
 
+	ui.sectionLabel(farm, "WEAPON")
+	-- Weapon dropdown — populated from backpack at open time
+	local weaponNames = getWeaponOptions()
+	table.insert(weaponNames, 1, "—")
+	ui.dropdownRow(farm, "Auto-equip weapon",
+		weaponNames,
+		function() return cfg.selectedWeapon ~= "" and cfg.selectedWeapon or "—" end,
+		function(name)
+			cfg.selectedWeapon = (name == "—") and "" or name
+		end)
+
+	ui.sectionLabel(farm, "ABILITIES")
+	ui.toggleRow(farm, "Z",
+		function() return cfg.abilitySlots.Z end,
+		function(v) cfg.abilitySlots.Z = v end)
+	ui.toggleRow(farm, "X",
+		function() return cfg.abilitySlots.X end,
+		function(v) cfg.abilitySlots.X = v end)
+	ui.toggleRow(farm, "C",
+		function() return cfg.abilitySlots.C end,
+		function(v) cfg.abilitySlots.C = v end)
+	ui.toggleRow(farm, "V",
+		function() return cfg.abilitySlots.V end,
+		function(v) cfg.abilitySlots.V = v end)
+	ui.toggleRow(farm, "F",
+		function() return cfg.abilitySlots.F end,
+		function(v) cfg.abilitySlots.F = v end)
+	ui.intervalRow(farm, "Ability cadence (sec)",
+		function() return cfg.abilityCadence end,
+		function(v) cfg.abilityCadence = v end,
+		{ 1.0, 1.5, 2.0, 3.0, 5.0 })
+
 	ui.sectionLabel(farm, "TARGET FILTER")
 	ui.intervalRow(farm, "Min enemy level",
 		function() return cfg.farmLevelMin end,
@@ -1106,25 +1311,9 @@ function Module.start(lib)
 		{ 25, 50, 100, 250, 500, 9999 })
 
 	-- ─── SEA 1 TAB ───
+	-- Kept for island ESP + manual TP. The old auto-progression toggle
+	-- is superseded by Auto Farm Level on the Farm tab.
 	local sea1 = ui.newPage("sea1")
-	ui.sectionLabel(sea1, "AUTO PROGRESSION")
-	ui.toggleRow(sea1, "Auto Sea 1 (quest + island chain)",
-		function() return cfg.autoSea1 end,
-		function(v)
-			cfg.autoSea1 = v
-			if v then
-				cfg.autoFarm = true  -- auto-farm is implied
-				safe(ensureToolEquipped)
-				if not getHash() then
-					ensureHash()
-					Toast.show({
-						title = "Hash auto-generated",
-						body  = "Session token ready — Sea 1 loop driving itself.",
-						kind  = "success", duration = 4,
-					})
-				end
-			end
-		end)
 
 	ui.sectionLabel(sea1, "ISLAND ESP")
 	ui.toggleRow(sea1, "Show island markers",
@@ -1132,9 +1321,6 @@ function Module.start(lib)
 		function(v) cfg.espIslands = v; buildIslandESP() end)
 
 	ui.sectionLabel(sea1, "MANUAL TP")
-	-- Single dropdown of every Sea 1 island. Picking one fires the TP
-	-- and the toast shows the level range — same info as the old button
-	-- grid but a fraction of the screen weight.
 	local islandOptions = {}
 	for _, island in ipairs(ISLANDS) do table.insert(islandOptions, island.name) end
 
@@ -1144,19 +1330,17 @@ function Module.start(lib)
 		function() return lastTpDestination end,
 		function(name)
 			lastTpDestination = name
-			-- Manual override: if Auto Sea 1 was on it would yank us back
-			-- on the next tick (3s loop). User clearly wants manual control.
-			local wasAuto = cfg.autoSea1
+			local wasAuto = cfg.autoFarmLevel
 			if wasAuto then
-				cfg.autoSea1 = false
-				autoSeaState.lastQuestKey = nil
+				cfg.autoFarmLevel = false
+				Q.accepted = false; Q.current = nil; Q.key = nil
 			end
 			local ok = tpToIsland(name)
 			local island = ISLAND_BY_NAME[name]
 			Toast.show({
 				title = ok and "Teleported" or "TP failed",
 				body  = name .. (island and ("  •  " .. island.lvlRange) or "") ..
-				        (wasAuto and "  (Auto Sea 1 paused)" or ""),
+				        (wasAuto and "  (Auto Farm Level paused)" or ""),
 				kind  = ok and "success" or "warn", duration = 4,
 				key   = "tp:" .. name,
 			})
@@ -1243,15 +1427,16 @@ function Module.start(lib)
 
 	-- ═══════════════════════════ KICK OFF ═══════════════════════════
 	task.spawn(autoFarmLoop)
-	task.spawn(autoSea1Loop)
+	task.spawn(autoFarmLevelLoop)
+	task.spawn(abilityRotationLoop)
 	task.spawn(autoStatsLoop)
 	task.spawn(trackProgressLoop)
 	antiAfkLoop()
 
 	Toast.show({
 		title = "Vellum loaded",
-		body = "Toggle Auto-farm — hash self-generates on first attack tick.",
-		kind = "info", duration = 6,
+		body  = "Auto Farm Level, weapons, and ability rotation ready.",
+		kind  = "info", duration = 6,
 	})
 
 	print("[Vellum BF] module loaded.")
