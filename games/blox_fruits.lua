@@ -812,12 +812,13 @@ function Module.start(lib)
 								end
 							end
 						end
+						-- New target acquired — return immediately. Next loop
+						-- iteration sees currentTarget is set and attacks.
+						return
 					end
-					-- Throttle scan: enemies spawn on a timer (~5-10s waves).
-					-- Scanning every 0.15s allocates a `GetChildren` table
-					-- every call — unnecessary GC pressure when nothing's alive.
-					-- 1.5s is safe: we don't miss kills because the character
-					-- is already in combat with the nearest target.
+					-- No enemies alive anywhere on the map. Throttle scan:
+					-- waves respawn on a 5-10s timer, scanning faster just
+					-- allocates wasted GetChildren tables.
 					jwait(1.5)
 					return
 				end
