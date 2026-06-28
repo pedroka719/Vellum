@@ -425,6 +425,8 @@ function Module.start(lib)
 		-- destroy as a safety net. Without this the BP (MaxForce=math.huge)
 		-- holds the character locked in place and the BG fights rotation,
 		-- making jump/dodge impossible after toggle-off.
+		-- Also sweep the HRP for any orphan Vellum_* instances left by
+		-- interrupted tweens or partial cleanup from prior crashes.
 		if _hoverBP then
 			_hoverBP.MaxForce = Vector3.new(0, 0, 0)
 			_hoverBP.Parent = nil
@@ -434,6 +436,22 @@ function Module.start(lib)
 			_hoverBG.MaxTorque = Vector3.new(0, 0, 0)
 			_hoverBG.Parent = nil
 			pcall(function() _hoverBG:Destroy() end)
+		end
+		local ch = LocalPlayer.Character
+		local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+		if hrp then
+			for _, child in ipairs(hrp:GetChildren()) do
+				if child.Name:find("^Vellum_") then
+					if child:IsA("BodyMover") then
+						child.MaxForce = Vector3.new(0, 0, 0)
+					end
+					if child:IsA("BodyGyro") then
+						child.MaxTorque = Vector3.new(0, 0, 0)
+					end
+					child.Parent = nil
+					pcall(function() child:Destroy() end)
+				end
+			end
 		end
 		_hoverBP = nil
 		_hoverBG = nil
