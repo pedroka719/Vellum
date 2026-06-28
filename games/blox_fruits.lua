@@ -769,25 +769,22 @@ function Module.start(lib)
 						local ehrp = newEnemy:FindFirstChild("HumanoidRootPart")
 						if hrp and ehrp then
 							local dist = (ehrp.Position - hrp.Position).Magnitude
-							if dist > 3 then
+							-- Only CFrame-tween for long distances (>100 studs).
+							-- Normal combat transitions use BP physics movement
+							-- (accelerates at ~12 m/s² with P=600). Writing HRP.CFrame
+							-- through a dense field of 500+ enemy collision bodies
+							-- forces the physics engine to rebuild spatial state
+							-- every frame of the tween — massive fps drops.
+							if dist > 100 then
 								targetOriginalY = ehrp.Position.Y
 								local hoverY = targetOriginalY + cfg.farmHeight
 								local dest = Vector3.new(ehrp.Position.X, hoverY, ehrp.Position.Z)
-								-- Disable hover forces during tween instead of
-								-- destroy+recreate (was killing perf and the
-								-- unconditional startFlight() re-enabled flight
-								-- even after user toggled auto-farm off).
-								-- Also disable BG: P=1000 torque against
-								-- CFrame writes creates force conflict.
 								if _hoverBP and _hoverBP.Parent then
 									_hoverBP.P, _hoverBP.D = 0, 0
 									if _hoverBG and _hoverBG.Parent then
 										_hoverBG.P = 0
 									end
 									_tweenHRPTo(hrp, dest)
-									-- Re-check after the tween yield — the
-									-- Heartbeat might have killed the hover
-									-- (auto-farm toggle or anticheat).
 									if _hoverBP and _hoverBP.Parent then
 										_hoverBP.P, _hoverBP.D = 600, 80
 										_hoverBP.Position = dest
@@ -796,9 +793,13 @@ function Module.start(lib)
 										_hoverBG.P = 1000
 									end
 								else
-									-- BP already gone — just tween; the
-									-- loop guards will re-create or skip.
 									_tweenHRPTo(hrp, dest)
+								end
+							else
+								-- Under 100 studs: BP physics movement only.
+								local hoverY = (targetOriginalY or ehrp.Position.Y) + cfg.farmHeight
+								if _hoverBP and _hoverBP.Parent then
+									_hoverBP.Position = Vector3.new(ehrp.Position.X, hoverY, ehrp.Position.Z)
 								end
 							end
 						end
