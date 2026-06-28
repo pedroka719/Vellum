@@ -658,16 +658,17 @@ function Module.start(lib)
 		_hoverBP = Instance.new("BodyPosition")
 		_hoverBP.Name = "Vellum_HoverBP"
 		_hoverBP.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
-		_hoverBP.P = 5000
-		_hoverBP.D = 200
+		_hoverBP.P = 600    -- 5000 was applying insane force (5000N/stud) that
+		_hoverBP.D = 80     -- the physics engine had to resolve against every
+		                    -- enemy collision body — dropping 60→12 fps.
 		_hoverBP.Position = hrp.Position
 		_hoverBP.Parent = hrp
 
 		_hoverBG = Instance.new("BodyGyro")
 		_hoverBG.Name = "Vellum_HoverBG"
 		_hoverBG.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
-		_hoverBG.P = 5000
-		_hoverBG.D = 500
+		_hoverBG.P = 1000
+		_hoverBG.D = 300
 		_hoverBG.CFrame = hrp.CFrame
 		_hoverBG.Parent = hrp
 
@@ -776,15 +777,23 @@ function Module.start(lib)
 								-- destroy+recreate (was killing perf and the
 								-- unconditional startFlight() re-enabled flight
 								-- even after user toggled auto-farm off).
+								-- Also disable BG: P=1000 torque against
+								-- CFrame writes creates force conflict.
 								if _hoverBP and _hoverBP.Parent then
 									_hoverBP.P, _hoverBP.D = 0, 0
+									if _hoverBG and _hoverBG.Parent then
+										_hoverBG.P = 0
+									end
 									_tweenHRPTo(hrp, dest)
 									-- Re-check after the tween yield — the
 									-- Heartbeat might have killed the hover
 									-- (auto-farm toggle or anticheat).
 									if _hoverBP and _hoverBP.Parent then
-										_hoverBP.P, _hoverBP.D = 5000, 200
+										_hoverBP.P, _hoverBP.D = 600, 80
 										_hoverBP.Position = dest
+									end
+									if _hoverBG and _hoverBG.Parent then
+										_hoverBG.P = 1000
 									end
 								else
 									-- BP already gone — just tween; the
