@@ -425,25 +425,6 @@ function Module.start(lib)
 		currentTarget = nil
 		targetOriginalY = nil
 		hoverEnabled = false
-
-		-- Kill residual physics momentum so the character doesn't "coast"
-		-- after the hover BP is destroyed. The BP applies force to hold
-		-- position — when destroyed, accumulated velocity keeps the
-		-- character moving for ~0.5-1s (physics friction). A brief
-		-- zero-velocity brake kills that instantly.
-		local ch = LocalPlayer.Character
-		local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
-		if hrp then
-			local brake = Instance.new("BodyVelocity")
-			brake.Name = "Vellum_Brake"
-			brake.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
-			brake.Velocity = Vector3.new(0, 0, 0)
-			brake.P = 10000
-			brake.Parent = hrp
-			task.delay(0.3, function()
-				if brake and brake.Parent then brake:Destroy() end
-			end)
-		end
 	end
 
 	local function _tweenHRPTo(hrp, destPos)
