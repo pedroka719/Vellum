@@ -413,6 +413,7 @@ function Module.start(lib)
 	-- Forward-declared so tpToIsland can call _stopFlightFn. Some executors
 	-- miscompile `local function` forward refs, so we assign into a pre-decl.
 	local _stopFlightFn
+	local _bringBPs = {}       -- enemy HRP -> BodyPosition for mob magnet
 
 	_stopFlightFn = function()
 		-- Cancel any active tween so toggle-off stops movement instantly
@@ -686,7 +687,7 @@ function Module.start(lib)
 	local hoverEnabled = false -- only run flight while auto-farm is on
 	local _hoverBP             -- BodyPosition that holds us in the air
 	local _hoverBG             -- BodyGyro to keep us upright
-	local _bringBPs = {}       -- enemy HRP -> BodyPosition for mob magnet
+	-- _bringBPs declared above before _stopFlightFn
 
 	local function startFlight()
 		if flightConn then return end
