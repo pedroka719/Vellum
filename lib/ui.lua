@@ -170,6 +170,9 @@ function UI.mount(opts)
 	Theme.bind(minBtn, "TextColor3", "textDim"); minBtn.AutoButtonColor = false
 	minBtn.MouseEnter:Connect(function() minBtn.TextColor3 = Theme.token("accent") end)
 	minBtn.MouseLeave:Connect(function() minBtn.TextColor3 = Theme.token("textDim") end)
+	minBtn.MouseButton1Click:Connect(function()
+		root.Visible = not root.Visible
+	end)
 
 	-- ─── sidebar (flat list, accent strip marks active) ───
 	local sidebar = Instance.new("Frame", root)

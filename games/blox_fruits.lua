@@ -873,9 +873,9 @@ function Module.start(lib)
 		end
 	end
 
-	-- Equip a Tool from the backpack. If cfg.selectedWeapon is set and matches
-	-- a backpack tool, equip that one. Otherwise fall back to the first tool.
-	-- Returns the equipped Tool or nil.
+	-- BF uses ToolTip property to classify weapon types: Melee, Sword, Gun, Blox Fruit.
+	-- The hotbar (1/2/3/4) maps to these types. cfg.selectedWeapon stores the ToolTip
+	-- value the user wants, and we find the first backpack tool with that ToolTip.
 	local function ensureWeaponEquipped()
 		local ch = LocalPlayer.Character
 		if not ch then return nil end
@@ -886,26 +886,26 @@ function Module.start(lib)
 		-- Check what's already in-hand
 		local held = ch:FindFirstChildOfClass("Tool")
 		if held then
-			-- Already holding the selected weapon
-			if cfg.selectedWeapon ~= "" and held.Name == cfg.selectedWeapon then
+			-- Already holding something — only re-equip if it doesn't match the selected style
+			if cfg.selectedWeapon == "" or held.ToolTip == cfg.selectedWeapon then
 				return held
 			end
-			return held
 		end
 
 		if not backpack then return nil end
 
-		-- Try selected weapon first
+		-- Try to equip a tool matching the selected style (by ToolTip)
 		if cfg.selectedWeapon ~= "" then
-			local tool = backpack:FindFirstChild(cfg.selectedWeapon)
-			if tool and tool:IsA("Tool") then
-				safe(function() hum:EquipTool(tool) end)
-				task.wait(0.15)
-				return ch:FindFirstChildOfClass("Tool")
+			for _, tool in ipairs(backpack:GetChildren()) do
+				if tool:IsA("Tool") and tool.ToolTip == cfg.selectedWeapon then
+					safe(function() hum:EquipTool(tool) end)
+					task.wait(0.15)
+					return ch:FindFirstChildOfClass("Tool")
+				end
 			end
 		end
 
-		-- Fallback: first tool
+		-- Fallback: first tool in backpack
 		local tool = backpack:FindFirstChildOfClass("Tool")
 		if not tool then return nil end
 		safe(function() hum:EquipTool(tool) end)
@@ -916,45 +916,77 @@ function Module.start(lib)
 	-- Legacy alias used by autoFarmLoop
 	local ensureToolEquipped = ensureWeaponEquipped
 
-	-- Return a table of available weapon names from the backpack for the UI dropdown.
+	-- Return available weapon STYLES (unique ToolTip values) from the backpack.
+	-- e.g. {"Melee", "Sword", "Gun", "Blox Fruit"} depending on what the player owns.
+	-- The "Blox Fruit" type maps to whatever fruit the player has equipped.
+	local STYLE_ORDER = { Melee = 1, Sword = 2, Gun = 3, ["Blox Fruit"] = 4 }
+
 	local function getWeaponOptions()
-		local names = {}
+		local seen = {}
+		-- Scan both backpack and character (equipped tool lives on character)
 		local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
 		if backpack then
 			for _, child in ipairs(backpack:GetChildren()) do
-				if child:IsA("Tool") then
-					table.insert(names, child.Name)
+				if child:IsA("Tool") and child.ToolTip and child.ToolTip ~= "" then
+					seen[child.ToolTip] = true
 				end
 			end
 		end
-		table.sort(names)
-		return names
+		local ch = LocalPlayer.Character
+		if ch then
+			for _, child in ipairs(ch:GetChildren()) do
+				if child:IsA("Tool") and child.ToolTip and child.ToolTip ~= "" then
+					seen[child.ToolTip] = true
+				end
+			end
+		end
+		local styles = {}
+		for tip in pairs(seen) do table.insert(styles, tip) end
+		table.sort(styles, function(a, b)
+			local oa = STYLE_ORDER[a] or 99
+			local ob = STYLE_ORDER[b] or 99
+			if oa ~= ob then return oa < ob end
+			return a < b
+		end)
+		return styles
 	end
 
 	-- ═══════════════════════════ ABILITY ROTATION ═══════════════════════════
-	-- Fires the Activated event on the currently equipped tool at a configurable
-	-- cadence for each enabled ability slot (Z, X, C, V, F).
-	-- Uses firesignal(Tool.Activated) which triggers the game's client-side
-	-- combat handler the same way pressing the key would.
+	-- BF handles abilities through the tool's RemoteEvent + RemoteFunction.
+	-- Slot names (Z, X, C, V, F) are passed as ARGUMENTS to the remote, not
+	-- individual child events. We fire both:
+	--   1. RemoteEvent:FireServer(mouse.Hit.p)     — target position (Z-type)
+	--   2. RemoteFunction:InvokeServer(slotName)    — which ability to activate
+	-- The RemoteFunction is spawned so it doesn't block the loop.
 	local SLOT_NAMES = { "Z", "X", "C", "V", "F" }
 
 	local function abilityRotationTick()
-		if not cfg.autoFarm then return end  -- only use abilities while farming
+		if not cfg.autoFarm then return end
 		local ch = LocalPlayer.Character
 		local tool = ch and ch:FindFirstChildOfClass("Tool")
 		if not tool then return end
 
+		local remoteEvent = tool:FindFirstChildOfClass("RemoteEvent")
+		local remoteFunction = tool:FindFirstChildOfClass("RemoteFunction")
+		-- skip the EquipEvent remote — that's not an ability trigger
+		if remoteEvent and remoteEvent.Name == "EquipEvent" then remoteEvent = nil end
+
 		for _, slot in ipairs(SLOT_NAMES) do
 			if cfg.abilitySlots[slot] then
 				safe(function()
-					local ev = tool:FindFirstChild(slot)
-					if ev and ev:IsA("RemoteEvent") then
-						ev:FireServer()
-					elseif ev and ev:IsA("BindableEvent") then
-						ev:Fire()
+					-- Fire position remote (Z-type abilities need a target)
+					if remoteEvent then
+						local mouse = LocalPlayer:GetMouse()
+						remoteEvent:FireServer(mouse.Hit.p)
+					end
+					-- Invoke slot remote with the ability name
+					if remoteFunction then
+						task.spawn(function()
+							remoteFunction:InvokeServer(slot)
+						end)
 					end
 				end)
-				task.wait(0.05)  -- small gap between slot activations
+				task.wait(0.05)
 			end
 		end
 	end
@@ -1227,6 +1259,9 @@ function Module.start(lib)
 						kind  = "success", duration = 4,
 					})
 				end
+			else
+				cfg.autoFarm = false
+				safe(_stopFlightFn)
 			end
 		end)
 	ui.toggleRow(farm, "Simple Kill Mode (no quests)",
@@ -1268,15 +1303,14 @@ function Module.start(lib)
 		function(v) cfg.mobBringRadius = v end,
 		{ 20, 35, 50, 75, 100, 150 })
 
-	ui.sectionLabel(farm, "WEAPON")
-	-- Weapon dropdown — populated from backpack at open time
-	local weaponNames = getWeaponOptions()
-	table.insert(weaponNames, 1, "—")
-	ui.dropdownRow(farm, "Auto-equip weapon",
-		weaponNames,
-		function() return cfg.selectedWeapon ~= "" and cfg.selectedWeapon or "—" end,
+	ui.sectionLabel(farm, "WEAPON STYLE")
+	local weaponStyles = getWeaponOptions()
+	table.insert(weaponStyles, 1, "Auto")
+	ui.dropdownRow(farm, "Style priority",
+		weaponStyles,
+		function() return cfg.selectedWeapon ~= "" and cfg.selectedWeapon or "Auto" end,
 		function(name)
-			cfg.selectedWeapon = (name == "—") and "" or name
+			cfg.selectedWeapon = (name == "Auto") and "" or name
 		end)
 
 	ui.sectionLabel(farm, "ABILITIES")
