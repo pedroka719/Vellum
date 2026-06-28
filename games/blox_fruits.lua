@@ -195,15 +195,15 @@ function Module.start(lib)
 		end)
 	end)
 
-	if cfg.spyEnabled and not SPY.hookInstalled then
+	-- Hooks DISABLED: suspected Hyperion delayed-crash trigger.
+	-- Our attack loop fires FireServer directly with self-generated hash
+	-- — no dependency on either hook. Keep dead code for easy re-enable
+	-- during debugging sessions where spy capture is needed.
+	if false then
 		local POLL_NOISE = {
 			getInventory = true, getFish = true, getRaceLevel = true,
 			getInfo = true, getStarterPack = true, getRouletteData = true,
 		}
-		-- Decimation counter: only push 1 in every N FireServer calls to
-		-- the ring buffer. Reduces GC pressure from ~22 table allocs/sec to
-		-- ~4.4/sec — small difference per-frame but avoids cumulative backlog
-		-- that can outrun the incremental GC over multi-minute sessions.
 		SPY.decim = 5
 		SPY.decimN = 0
 		local oldNC
@@ -245,17 +245,17 @@ function Module.start(lib)
 	-- would re-trigger __index and infinite-recurse. Use oldIdx(self, key)
 	-- for any property read we need, and :IsA which goes through __namecall
 	-- (a different metamethod) so it doesn't loop.
-	if cfg.spyEnabled and not SPY.mouseHookInstalled then
+	if false then
+		-- __index Mouse redirect DISABLED — same root cause as __namecall
+		-- hook. Current attackOnce() fires FireServer directly, has no
+		-- dependency on Mouse redirects. Keep dead code for re-enable.
 		local oldIdx
 		oldIdx = hookmetamethod(game, "__index", function(self, key)
 			if SPY._captureMode and SPY._captureTarget then
 				if typeof(self) == "Instance" and self:IsA("Mouse") then
-					-- oldIdx is for Instance __index only — never pass it a
-					-- value type (CFrame, Vector3). Those have native field
-					-- access (.Position, .X, .Y) with no metamethod involved.
 					local target = SPY._captureTarget
-					local targetCF = oldIdx(target, "CFrame")  -- Instance → ok
-					local targetPos = targetCF.Position         -- value type
+					local targetCF = oldIdx(target, "CFrame")
+					local targetPos = targetCF.Position
 					if key == "Hit" then
 						return targetCF
 					elseif key == "Target" then
