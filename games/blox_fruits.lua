@@ -751,6 +751,20 @@ function Module.start(lib)
 		return ch:FindFirstChildOfClass("Tool")
 	end
 
+	-- Diagnostics: toggle via executor:  getgenv().VellumBF.diag = true
+	-- Prints loop state transitions to the Roblox developer console (F9).
+	local DIAG = { lastState = "", lastTick = 0 }
+	local function dbg(state, extra)
+		local g = getgenv().VellumBF
+		if not (g and g.diag) then return end
+		local now = os.clock()
+		if state ~= DIAG.lastState then
+			print(string.format("[BF-diag] %.2f (+%.2f) %s %s", now, now - DIAG.lastTick, state, extra or ""))
+			DIAG.lastState = state
+			DIAG.lastTick = now
+		end
+	end
+
 	local function autoFarmLoop()
 		while gui.Parent do
 			if _tpInProgress then jwait(1.0) continue end
@@ -770,7 +784,9 @@ function Module.start(lib)
 					-- Without this, we'd jwait 0.3s doing nothing and rely on
 					-- BodyPosition physics to slowly drag us — which BF's
 					-- anticheat often removes, locking us in place.
+					DEBUG.pickTime = os.clock()
 					local newEnemy = pickEnemy()
+					dbg("pick", newEnemy and newEnemy.Name or "none")
 					if newEnemy then
 						currentTarget = newEnemy
 						local ch = LocalPlayer.Character
@@ -785,6 +801,7 @@ function Module.start(lib)
 							-- forces the physics engine to rebuild spatial state
 							-- every frame of the tween — massive fps drops.
 							if dist > 100 then
+								dbg("tween-start", newEnemy.Name .. " dist=" .. math.floor(dist))
 								targetOriginalY = ehrp.Position.Y
 								local hoverY = targetOriginalY + cfg.farmHeight
 								local dest = Vector3.new(ehrp.Position.X, hoverY, ehrp.Position.Z)
@@ -794,6 +811,7 @@ function Module.start(lib)
 										_hoverBG.P = 0
 									end
 									_tweenHRPTo(hrp, dest)
+									dbg("tween-done", newEnemy.Name)
 									if _hoverBP and _hoverBP.Parent then
 										_hoverBP.P, _hoverBP.D = 600, 80
 										_hoverBP.Position = dest
@@ -803,9 +821,11 @@ function Module.start(lib)
 									end
 								else
 									_tweenHRPTo(hrp, dest)
+									dbg("tween-done", newEnemy.Name)
 								end
 							else
 								-- Under 100 studs: BP physics movement only.
+								dbg("bp-move", newEnemy.Name .. " dist=" .. math.floor(dist))
 								local hoverY = (targetOriginalY or ehrp.Position.Y) + cfg.farmHeight
 								if _hoverBP and _hoverBP.Parent then
 									_hoverBP.Position = Vector3.new(ehrp.Position.X, hoverY, ehrp.Position.Z)
@@ -825,10 +845,16 @@ function Module.start(lib)
 
 				-- Standard RegisterAttack+RegisterHit protocol with self-generated hash.
 				ensureHash()  -- generates + registers if not yet set
+				local t0 = os.clock()
 				local landed = attackOnce(enemy)
+				local elapsed = os.clock() - t0
+				if elapsed > 0.01 then
+					dbg("attack-slow", enemy.Name .. " took=" .. string.format("%.4f", elapsed))
+				end
 
 				if enemy and not enemy.Parent then
 					stats.sessionKills = stats.sessionKills + 1
+					dbg("kill", enemy.Name)
 					currentTarget = nil
 					targetOriginalY = nil
 				end
