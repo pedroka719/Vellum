@@ -417,12 +417,14 @@ function Module.start(lib)
 	--      Y first with a direct CFrame write, wait 0.5s for the server to
 	--      reconcile. BF tolerates pure vertical jumps better than diagonals.
 	--   2. Tween HRP CFrame to the destination at TP_TWEEN_SPEED studs/sec
-	--      linear. ~220 keeps duration well above the 5s detection floor for
-	--      any non-trivial trip.
-	--   3. For destinations behind a server-side portal (Underwater City),
+	--      linear. 150 keeps duration well above the 5s detection floor for
+	--      any non-trivial trip. Fallback at 80 for retries after rollback.
+	--   3. Y delta is handled by the tween itself — no instant CFrame snap.
+	--      BF's server velocity guard flags single-frame position jumps.
+	--   4. For destinations behind a server-side portal (Underwater City),
 	--      tween to the portal pad first, then fire CommF_:requestEntrance —
 	--      the server completes the warp legitimately, no rollback risk.
-	local TP_TWEEN_SPEED   = 220
+	local TP_TWEEN_SPEED   = 150
 	local Y_SNAP_THRESHOLD = 75
 	local activeTween
 
@@ -481,21 +483,25 @@ function Module.start(lib)
 		currentTarget = nil
 		targetOriginalY = nil
 		hoverEnabled = false
+
+		-- Restore collision on character parts
+		local ch2 = LocalPlayer.Character
+		if ch2 then
+			for _, p in ipairs(ch2:GetDescendants()) do
+				if p:IsA("BasePart") then
+					p.CanCollide = true
+				end
+			end
+		end
 	end
 
 	local function _tweenHRPTo(hrp, destPos, opts)
 		opts = opts or {}
 		local speed         = opts.speed         or TP_TWEEN_SPEED
-		local fallbackSpeed = opts.fallbackSpeed  or 120
+		local fallbackSpeed = opts.fallbackSpeed  or 80
 		local maxRetries    = opts.retries        or 2
 
 		if activeTween then pcall(function() activeTween:Cancel() end) end
-
-		local yDelta = math.abs(destPos.Y - hrp.Position.Y)
-		if yDelta > Y_SNAP_THRESHOLD then
-			hrp.CFrame = CFrame.new(hrp.Position.X, destPos.Y, hrp.Position.Z)
-			task.wait(0.5)
-		end
 
 		local destCF = CFrame.new(destPos, destPos - Vector3.new(0, 0, 1))
 		local dist = (destPos - hrp.Position).Magnitude
@@ -513,6 +519,7 @@ function Module.start(lib)
 			local arrived = (hrp.Position - destPos).Magnitude < 80
 			if arrived then return end
 
+			dist = (destPos - hrp.Position).Magnitude
 			task.wait(0.3)
 		end
 	end
@@ -765,8 +772,6 @@ function Module.start(lib)
 		-- (see _stopFlightFn — it only cleans BPs, not the signal).
 		if not flightConn then
 			flightConn = RunService.Heartbeat:Connect(function()
-				-- NEVER self-destruct. Just return early when conditions
-				-- aren't met. The connection lives for the whole session.
 				if not (hoverEnabled and cfg.autoFarm) then return end
 				if _tpInProgress then return end
 
@@ -776,9 +781,9 @@ function Module.start(lib)
 				if not _hoverBP or not _hoverBP.Parent then return end
 				if not _hoverBG or not _hoverBG.Parent then return end
 
-				-- Follow the autoFarmLoop's target. No pickEnemy here — scanning
-				-- ALL enemies 60x/sec was the main lag source. The farm loop
-				-- calls pickEnemy itself when a target dies (~5x/sec).
+				-- Maintain noclip: Roblox re-enables CanCollide every physics step
+				hrp2.CanCollide = false
+
 				local enemy = (currentTarget and currentTarget.Parent) and currentTarget or nil
 
 				if enemy then
@@ -805,7 +810,18 @@ function Module.start(lib)
 			end)
 		end
 		hoverEnabled = true
+
+		-- Noclip: disable collision on HRP and all body parts so we pass
+		-- through buildings/walls when farming near structures.
+		for _, p in ipairs(ch:GetDescendants()) do
+			if p:IsA("BasePart") then
+				p.CanCollide = false
+			end
+		end
 	end
+
+	local _islandGraceUntil = 0  -- tick() timestamp: skip atIsland TP until this expires
+	local _islandGraceName  = "" -- which island the grace is for
 
 	local function autoFarmLevelLoop()
 		while _running do
@@ -815,7 +831,6 @@ function Module.start(lib)
 				continue
 			end
 
-			-- auto-farm must be on for kills to happen
 			cfg.autoFarm = true
 
 			local data = LocalPlayer:FindFirstChild("Data")
@@ -823,11 +838,10 @@ function Module.start(lib)
 			if not levelVal then jwait(3.0); continue end
 			local level = levelVal.Value
 
-			-- Level-up detection: if level crossed into a new quest bracket,
-			-- reset state so we pick the next tier on this tick.
 			if level ~= Q.lastLevel then
 				Q.lastLevel = level
 				Q.accepted = false
+				_islandGraceUntil = 0
 			end
 
 			local quest = pickQuest(level)
@@ -861,17 +875,29 @@ function Module.start(lib)
 				Q.kills = 0
 				Q.current = nil
 				Q.key = nil
-				-- Next tick will pick the next tier (same level → higher tier quest)
+				_islandGraceUntil = 0
 				jwait(0.5)
 				continue
 			end
 
-			-- TP to the quest's island if we aren't there yet
-			if not atIsland(quest.island) then
+			-- TP to the quest's island if we aren't there yet.
+			-- Grace period: after arriving, skip the TP check for 60s so chasing
+			-- enemies beyond the atIsland radius doesn't loop us back.
+			local needsTP = not atIsland(quest.island)
+				and not (_islandGraceName == quest.island and tick() < _islandGraceUntil)
+			if needsTP then
 				tpToIsland(quest.island)
+				_islandGraceUntil = tick() + 60
+				_islandGraceName = quest.island
 				task.wait(0.8)
 				Q.accepted = false
 				continue
+			end
+
+			-- Arrived — start grace on first pass
+			if _islandGraceName ~= quest.island or tick() >= _islandGraceUntil then
+				_islandGraceUntil = tick() + 60
+				_islandGraceName = quest.island
 			end
 
 			-- Accept quest if not yet accepted this cycle
@@ -963,12 +989,14 @@ function Module.start(lib)
 	end
 
 	-- ═══════════════════════════ ABILITY ROTATION ═══════════════════════════
-	-- BF handles abilities through the tool's RemoteEvent + RemoteFunction.
-	-- Slot names (Z, X, C, V, F) are passed as ARGUMENTS to the remote, not
-	-- individual child events. We fire both:
-	--   1. RemoteEvent:FireServer(mouse.Hit.p)     — target position (Z-type)
-	--   2. RemoteFunction:InvokeServer(slotName)    — which ability to activate
-	-- The RemoteFunction is spawned so it doesn't block the loop.
+	-- BF's ability protocol (from FruitClient decompiled source):
+	--   1. tool.RemoteEvent:FireServer(true)      — signals "activation start"
+	--   2. Write tool.MousePos.Value = targetPos   — target for position-based skills
+	--   3. tool.RemoteEvent:FireServer(targetPos)  — sends Vector3 target
+	-- OR for CFrame abilities:
+	--   3. tool.RemoteEvent:FireServer(CFrame)     — sends Mouse.Hit CFrame
+	-- The Holding BoolValue on the tool flags sustained activation.
+	-- RemoteFunction on the tool is for M1 combat, NOT abilities.
 	local SLOT_NAMES = { "Z", "X", "C", "V", "F" }
 
 	local function abilityRotationTick()
@@ -977,28 +1005,75 @@ function Module.start(lib)
 		local tool = ch and ch:FindFirstChildOfClass("Tool")
 		if not tool then return end
 
-		local remoteEvent = tool:FindFirstChildOfClass("RemoteEvent")
-		local remoteFunction = tool:FindFirstChildOfClass("RemoteFunction")
-		-- skip the EquipEvent remote — that's not an ability trigger
-		if remoteEvent and remoteEvent.Name == "EquipEvent" then remoteEvent = nil end
-
-		for _, slot in ipairs(SLOT_NAMES) do
-			if cfg.abilitySlots[slot] then
-				safe(function()
-					-- Fire position remote (Z-type abilities need a target)
-					if remoteEvent then
-						local mouse = LocalPlayer:GetMouse()
-						remoteEvent:FireServer(mouse.Hit.p)
-					end
-					-- Invoke slot remote with the ability name
-					if remoteFunction then
-						task.spawn(function()
-							remoteFunction:InvokeServer(slot)
-						end)
-					end
-				end)
-				task.wait(0.05)
+		local re = tool:FindFirstChild("RemoteEvent")
+		if not re or not re:IsA("RemoteEvent") then return end
+		if re.Name == "EquipEvent" then
+			for _, c in ipairs(tool:GetChildren()) do
+				if c:IsA("RemoteEvent") and c.Name ~= "EquipEvent" and c.Name ~= "LegacyRemoteEvent" then
+					re = c
+					break
+				end
 			end
+		end
+
+		local legacyRe = tool:FindFirstChild("LegacyRemoteEvent")
+		local targetRe = legacyRe and legacyRe:IsA("RemoteEvent") and legacyRe or re
+
+		local mousePosVal = tool:FindFirstChild("MousePos")
+		local holdingVal = tool:FindFirstChild("Holding")
+
+		local targetPos
+		local enemy = currentTarget
+		if enemy and enemy.Parent then
+			local ehrp = enemy:FindFirstChild("HumanoidRootPart")
+			targetPos = ehrp and ehrp.Position
+		end
+		if not targetPos then
+			local hrp = ch:FindFirstChild("HumanoidRootPart")
+			targetPos = hrp and (hrp.Position + (hrp.CFrame.LookVector * 50))
+		end
+		if not targetPos then return end
+
+		local canFire = {}
+		local pg = LocalPlayer:FindFirstChild("PlayerGui")
+		local mainGui = pg and pg:FindFirstChild("Main")
+		local skillsGui = mainGui and mainGui:FindFirstChild("Skills")
+		local combatFrame = skillsGui and skillsGui:FindFirstChild("Combat")
+		if combatFrame then
+			for _, slot in ipairs(SLOT_NAMES) do
+				if cfg.abilitySlots[slot] then
+					local slotFrame = combatFrame:FindFirstChild(slot)
+					if slotFrame then
+						local cdFrame = slotFrame:FindFirstChild("Cooldown")
+						if not cdFrame or not cdFrame.Visible then
+							table.insert(canFire, slot)
+						end
+					else
+						table.insert(canFire, slot)
+					end
+				end
+			end
+		else
+			for _, slot in ipairs(SLOT_NAMES) do
+				if cfg.abilitySlots[slot] then
+					table.insert(canFire, slot)
+				end
+			end
+		end
+
+		for _, slot in ipairs(canFire) do
+			safe(function()
+				if mousePosVal and mousePosVal:IsA("Vector3Value") then
+					mousePosVal.Value = targetPos
+				end
+				targetRe:FireServer(true)
+				targetRe:FireServer(targetPos)
+				if holdingVal and holdingVal:IsA("BoolValue") then
+					holdingVal.Value = true
+					task.delay(0.15, function() holdingVal.Value = false end)
+				end
+			end)
+			task.wait(0.05)
 		end
 	end
 
