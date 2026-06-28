@@ -483,11 +483,14 @@ function Module.start(lib)
 		hoverEnabled = false
 	end
 
-	local function _tweenHRPTo(hrp, destPos)
+	local function _tweenHRPTo(hrp, destPos, opts)
+		opts = opts or {}
+		local speed         = opts.speed         or TP_TWEEN_SPEED
+		local fallbackSpeed = opts.fallbackSpeed  or 120
+		local maxRetries    = opts.retries        or 2
+
 		if activeTween then pcall(function() activeTween:Cancel() end) end
 
-		-- Y-snap pre-pass. Lifts/drops us to destination altitude first, so
-		-- the main tween only has to cover horizontal distance.
 		local yDelta = math.abs(destPos.Y - hrp.Position.Y)
 		if yDelta > Y_SNAP_THRESHOLD then
 			hrp.CFrame = CFrame.new(hrp.Position.X, destPos.Y, hrp.Position.Z)
@@ -498,12 +501,20 @@ function Module.start(lib)
 		local dist = (destPos - hrp.Position).Magnitude
 		if dist < 3 then return end
 
-		local dur = math.max(0.1, dist / TP_TWEEN_SPEED)
-		local tween = TweenService:Create(hrp, TweenInfo.new(dur, Enum.EasingStyle.Linear), { CFrame = destCF })
-		activeTween = tween
-		tween:Play()
-		tween.Completed:Wait()
-		if activeTween == tween then activeTween = nil end
+		for attempt = 1, maxRetries do
+			local curSpeed = attempt == 1 and speed or fallbackSpeed
+			local dur = math.max(0.1, dist / curSpeed)
+			local tween = TweenService:Create(hrp, TweenInfo.new(dur, Enum.EasingStyle.Linear), { CFrame = destCF })
+			activeTween = tween
+			tween:Play()
+			tween.Completed:Wait()
+			if activeTween == tween then activeTween = nil end
+
+			local arrived = (hrp.Position - destPos).Magnitude < 80
+			if arrived then return end
+
+			task.wait(0.3)
+		end
 	end
 
 	local function tpToIsland(name)
