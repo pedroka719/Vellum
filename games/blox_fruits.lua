@@ -852,7 +852,12 @@ function Module.start(lib)
 					dbg("attack-slow", enemy.Name .. " took=" .. string.format("%.4f", elapsed))
 				end
 
-				if enemy and not enemy.Parent then
+				-- Clear currentTarget as SOON as the enemy dies (Health <= 0),
+				-- not when BF removes the corpse from workspace.Enemies
+				-- (which takes 1-3s). Without this we waste ticks attacking a
+				-- dead enemy while pickEnemy() already switched to the next.
+				local hum = enemy and enemy:FindFirstChild("Humanoid")
+				if (enemy and not enemy.Parent) or (hum and hum.Health <= 0) then
 					stats.sessionKills = stats.sessionKills + 1
 					dbg("kill", enemy.Name)
 					currentTarget = nil
