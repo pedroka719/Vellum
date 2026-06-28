@@ -62,7 +62,7 @@ function Module.start(lib)
 		-- farm
 		autoFarm = false,
 		farmHeight = 10,            -- studs above target (safe farm)
-		attackCadence = 0.18,       -- sec between RegisterAttack/Hit pairs
+						attackCadence = 0.25,       -- sec between RegisterAttack/Hit pairs
 		damageMultiplier = 1.0,     -- 1.0 = always finisher hits
 		farmLevelMin = 0,           -- only attack enemies within range
 		farmLevelMax = 9999,
@@ -200,6 +200,12 @@ function Module.start(lib)
 			getInventory = true, getFish = true, getRaceLevel = true,
 			getInfo = true, getStarterPack = true, getRouletteData = true,
 		}
+		-- Decimation counter: only push 1 in every N FireServer calls to
+		-- the ring buffer. Reduces GC pressure from ~22 table allocs/sec to
+		-- ~4.4/sec — small difference per-frame but avoids cumulative backlog
+		-- that can outrun the incremental GC over multi-minute sessions.
+		SPY.decim = 5
+		SPY.decimN = 0
 		local oldNC
 		oldNC = hookmetamethod(game, "__namecall", function(self, ...)
 			local m = getnamecallmethod()
@@ -207,12 +213,15 @@ function Module.start(lib)
 				local nm = self.Name
 				local v = (select(1, ...))
 				if not (type(v) == "string" and POLL_NOISE[v]) then
-					spyPush({
-						t = os.clock(),
-						r = nm,
-						m = m,
-						v = type(v) == "string" and v or "<" .. type(v) .. ">",
-					})
+					SPY.decimN = (SPY.decimN % SPY.decim) + 1
+					if SPY.decimN == 1 then
+						spyPush({
+							t = os.clock(),
+							r = nm,
+							m = m,
+							v = type(v) == "string" and v or "<" .. type(v) .. ">",
+						})
+					end
 				end
 			end
 			return oldNC(self, ...)
@@ -807,7 +816,9 @@ function Module.start(lib)
 					-- Throttle scan: enemies spawn on a timer (~5-10s waves).
 					-- Scanning every 0.15s allocates a `GetChildren` table
 					-- every call — unnecessary GC pressure when nothing's alive.
-					jwait(0.5)
+					-- 1.5s is safe: we don't miss kills because the character
+					-- is already in combat with the nearest target.
+					jwait(1.5)
 					return
 				end
 
