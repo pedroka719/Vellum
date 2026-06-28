@@ -702,13 +702,26 @@ function Module.start(lib)
 		if _tpInProgress then return end  -- don't start during teleport
 		hoverEnabled = true
 
-		-- BodyPosition + BodyGyro hover (no CFrame writes — those trip
-		-- BF's anti-cheat rollback). Server treats it as legitimate physics.
+		-- Clean sweep: destroy any orphan Vellum_ BPs still parented from
+		-- a prior run that _stopFlightFn() only partially cleaned up.
+		-- Without this, duplicate BodyPositions fight each other for HRP
+		-- control and the hover drifts/floats unpredictably.
 		local ch = LocalPlayer.Character
 		local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
 		if not hrp then
 			_stopFlightFn()
 			return
+		end
+		for _, child in ipairs(hrp:GetChildren()) do
+			if child.Name:find("^Vellum_") then
+				if child:IsA("BodyGyro") then
+					child.MaxTorque = Vector3.new(0, 0, 0)
+				elseif child:IsA("BodyMover") then
+					child.MaxForce = Vector3.new(0, 0, 0)
+				end
+				child.Parent = nil
+				pcall(function() child:Destroy() end)
+			end
 		end
 
 		_hoverBP = Instance.new("BodyPosition")
@@ -863,7 +876,7 @@ function Module.start(lib)
 		while _running do
 			if _tpInProgress then jwait(1.0) continue end
 			if not cfg.autoFarm then
-				_stopFlightFn()
+				safe(_stopFlightFn)
 				jwait(0.5)
 				continue
 			end
@@ -1037,6 +1050,10 @@ function Module.start(lib)
 		function(v)
 			cfg.autoFarm = v
 			if v then
+				-- Full restart: tear down any stale flight state first
+				-- (orphan BPs, zombie Heartbeat connections) so the fresh
+				-- startFlight() creates a clean hover from scratch.
+				safe(_stopFlightFn)
 				safe(ensureToolEquipped)
 				safe(startFlight)
 				if not getHash() then
@@ -1158,7 +1175,7 @@ function Module.start(lib)
 	sessionLbl.Text = "—"
 
 	task.spawn(function()
-		while gui.Parent do
+		while _running do
 			local elapsed = os.clock() - stats.sessionStart
 			sessionLbl.Text = string.format(
 				"  Kills:  %d\n" ..
