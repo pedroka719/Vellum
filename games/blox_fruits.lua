@@ -841,7 +841,12 @@ function Module.start(lib)
 			if level ~= Q.lastLevel then
 				Q.lastLevel = level
 				Q.accepted = false
+				Q.kills = 0
+				Q.current = nil
+				Q.key = nil
 				_islandGraceUntil = 0
+				currentTarget = nil
+				targetOriginalY = nil
 			end
 
 			local quest = pickQuest(level)
@@ -876,6 +881,8 @@ function Module.start(lib)
 				Q.current = nil
 				Q.key = nil
 				_islandGraceUntil = 0
+				currentTarget = nil
+				targetOriginalY = nil
 				jwait(0.5)
 				continue
 			end
