@@ -807,7 +807,7 @@ function Module.start(lib)
 				continue
 			end
 
-			if not flightConn then startFlight() end
+			if not flightConn then safe(startFlight) end
 			ensureToolEquipped()
 
 			safe(function()
@@ -974,6 +974,7 @@ function Module.start(lib)
 			cfg.autoFarm = v
 			if v then
 				ensureToolEquipped()
+				safe(startFlight)
 				if not getHash() then
 					ensureHash()
 					Toast.show({
