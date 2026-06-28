@@ -784,7 +784,6 @@ function Module.start(lib)
 					-- Without this, we'd jwait 0.3s doing nothing and rely on
 					-- BodyPosition physics to slowly drag us — which BF's
 					-- anticheat often removes, locking us in place.
-					DEBUG.pickTime = os.clock()
 					local newEnemy = pickEnemy()
 					dbg("pick", newEnemy and newEnemy.Name or "none")
 					if newEnemy then
