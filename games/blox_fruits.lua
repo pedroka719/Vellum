@@ -122,6 +122,14 @@ function Module.start(lib)
 	-- so the hover loop doesn't fight the tween for HRP control.
 	local _tpInProgress = false
 
+	-- Master alive flag. Set to false when the GUI is closed so all spawned
+	-- loops (autoFarm, autoSea1, autoStats, progress) exit cleanly instead
+	-- of running forever. Without this the loops depended on gui.Parent,
+	-- which kills them when the ScreenGui is destroyed — but that means
+	-- toggling auto-farm back ON after closing/reopening the GUI does
+	-- nothing because the loop is already dead.
+	local _running = true
+
 	-- Self-generate and register a session hash using the same formula BF's
 	-- CombatUtil uses internally (UserId chars 2-4 + thread hex chars 11-15).
 	-- The server accepts any consistent 8-hex-char hash — we just have to fire
@@ -760,7 +768,7 @@ function Module.start(lib)
 	end
 
 	local function autoSea1Loop()
-		while gui.Parent do
+		while _running do
 			if _tpInProgress then jwait(1.0) continue end
 			if cfg.autoSea1 then
 				safe(autoSea1Tick)
@@ -852,7 +860,7 @@ function Module.start(lib)
 	end
 
 	local function autoFarmLoop()
-		while gui.Parent do
+		while _running do
 			if _tpInProgress then jwait(1.0) continue end
 			if not cfg.autoFarm then
 				_stopFlightFn()
@@ -861,7 +869,7 @@ function Module.start(lib)
 			end
 
 			if not flightConn then safe(startFlight) end
-			ensureToolEquipped()
+			safe(ensureToolEquipped)
 
 			safe(function()
 				local enemy = currentTarget
@@ -958,7 +966,7 @@ function Module.start(lib)
 	end
 
 	local function autoStatsLoop()
-		while gui.Parent do
+		while _running do
 			if cfg.autoStats then
 				safe(function()
 					local p = LocalPlayer.Data:FindFirstChild("Points")
@@ -995,7 +1003,7 @@ function Module.start(lib)
 		if not (expVal and beliVal) then return end
 
 		local lastXP, lastBeli = expVal.Value, beliVal.Value
-		while gui.Parent do
+		while _running do
 			task.wait(1)
 			local xp = expVal.Value
 			local beli = beliVal.Value
@@ -1015,6 +1023,7 @@ function Module.start(lib)
 		subtitle = "blox fruits",
 		size     = UDim2.fromOffset(560, 400),
 		position = UDim2.fromOffset(80, 100),
+		onClose  = function() _running = false end,
 	})
 	gui = ui.gui  -- now assignable, captured as upvalue by the loops above
 
@@ -1028,7 +1037,7 @@ function Module.start(lib)
 		function(v)
 			cfg.autoFarm = v
 			if v then
-				ensureToolEquipped()
+				safe(ensureToolEquipped)
 				safe(startFlight)
 				if not getHash() then
 					ensureHash()
@@ -1078,7 +1087,7 @@ function Module.start(lib)
 			cfg.autoSea1 = v
 			if v then
 				cfg.autoFarm = true  -- auto-farm is implied
-				ensureToolEquipped()
+				safe(ensureToolEquipped)
 				if not getHash() then
 					ensureHash()
 					Toast.show({
