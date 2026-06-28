@@ -418,8 +418,23 @@ function Module.start(lib)
 		-- the destination first.
 		if activeTween then pcall(function() activeTween:Cancel() end); activeTween = nil end
 		if flightConn then flightConn:Disconnect(); flightConn = nil end
-		if _hoverBP and _hoverBP.Parent then _hoverBP:Destroy() end
-		if _hoverBG and _hoverBG.Parent then _hoverBG:Destroy() end
+
+		-- Aggressively disable and remove all Vellum force fields.
+		-- Some executors block :Destroy() but allow property writes and
+		-- Parent=nil — so we zero force/torque first, then detach, then
+		-- destroy as a safety net. Without this the BP (MaxForce=math.huge)
+		-- holds the character locked in place and the BG fights rotation,
+		-- making jump/dodge impossible after toggle-off.
+		if _hoverBP then
+			_hoverBP.MaxForce = Vector3.new(0, 0, 0)
+			_hoverBP.Parent = nil
+			pcall(function() _hoverBP:Destroy() end)
+		end
+		if _hoverBG then
+			_hoverBG.MaxTorque = Vector3.new(0, 0, 0)
+			_hoverBG.Parent = nil
+			pcall(function() _hoverBG:Destroy() end)
+		end
 		_hoverBP = nil
 		_hoverBG = nil
 		currentTarget = nil
