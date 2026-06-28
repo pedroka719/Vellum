@@ -68,6 +68,8 @@ function Module.start(lib)
 		farmLevelMax = 9999,
 		farmTargetName = "",        -- "" = any enemy. Set to "Bandit" etc.
 		aggressiveRange = false,    -- pull target under us each tick (ignores server range)
+		mobBring = false,           -- pull all nearby enemies toward player
+		mobBringRadius = 50,        -- max studs to pull enemies from
 
 		-- auto sea progression
 		autoSea1 = false,            -- pick best quest for level + TP + accept + farm
@@ -442,19 +444,21 @@ function Module.start(lib)
 		if hrp then
 			for _, child in ipairs(hrp:GetChildren()) do
 				if child.Name:find("^Vellum_") then
-					if child:IsA("BodyMover") then
-						child.MaxForce = Vector3.new(0, 0, 0)
-					end
-					if child:IsA("BodyGyro") then
-						child.MaxTorque = Vector3.new(0, 0, 0)
-					end
-					child.Parent = nil
-					pcall(function() child:Destroy() end)
+				if child:IsA("BodyGyro") then
+					child.MaxTorque = Vector3.new(0, 0, 0)
+				elseif child:IsA("BodyMover") then
+					child.MaxForce = Vector3.new(0, 0, 0)
 				end
+				child.Parent = nil
+				pcall(function() child:Destroy() end)
 			end
+		end
 		end
 		_hoverBP = nil
 		_hoverBG = nil
+		for hrp, bp in pairs(_bringBPs) do pcall(function() bp:Destroy() end) end
+		_bringBPs = {}
+		
 		currentTarget = nil
 		targetOriginalY = nil
 		hoverEnabled = false
@@ -682,6 +686,7 @@ function Module.start(lib)
 	local hoverEnabled = false -- only run flight while auto-farm is on
 	local _hoverBP             -- BodyPosition that holds us in the air
 	local _hoverBG             -- BodyGyro to keep us upright
+	local _bringBPs = {}       -- enemy HRP -> BodyPosition for mob magnet
 
 	local function startFlight()
 		if flightConn then return end
@@ -798,6 +803,53 @@ function Module.start(lib)
 		end
 	end
 
+	-- ═══════════════════════════ MOB BRING ═══════════════════════════
+	local function _bringMobs()
+		if not cfg.mobBring then
+			for hrp, bp in pairs(_bringBPs) do
+				pcall(function() bp:Destroy() end)
+			end
+			_bringBPs = {}
+			return
+		end
+
+		local ch = LocalPlayer.Character
+		local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+		if not hrp then return end
+		local pos = hrp.Position
+
+		local seen = {}
+
+		for _, e in ipairs(workspace.Enemies:GetChildren()) do
+			local ehrp = e:FindFirstChild("HumanoidRootPart")
+			local hum  = e:FindFirstChild("Humanoid")
+			if ehrp and hum and hum.Health > 0 then
+				local dist = (ehrp.Position - pos).Magnitude
+				if dist <= cfg.mobBringRadius and dist > 3 then
+					seen[ehrp] = true
+					if not _bringBPs[ehrp] then
+						local bp = Instance.new("BodyPosition")
+						bp.Name = "Vellum_BringBP"
+						bp.MaxForce = Vector3.new(math.huge, 0, math.huge)
+						bp.P = 400
+						bp.D = 60
+						bp.Parent = ehrp
+						_bringBPs[ehrp] = bp
+					end
+					-- Pull toward player XZ — preserve enemy Y so we don't lift them
+					_bringBPs[ehrp].Position = Vector3.new(pos.X, ehrp.Position.Y, pos.Z)
+				end
+			end
+		end
+
+		for ehrp, bp in pairs(_bringBPs) do
+			if not seen[ehrp] then
+				pcall(function() bp:Destroy() end)
+				_bringBPs[ehrp] = nil
+			end
+		end
+	end
+
 	local function autoFarmLoop()
 		while gui.Parent do
 			if _tpInProgress then jwait(1.0) continue end
@@ -896,6 +948,8 @@ function Module.start(lib)
 					targetOriginalY = nil
 				end
 			end)
+
+			safe(_bringMobs)
 
 			-- ±20% jitter so fixed-period swings stop being a fingerprint.
 			jwait(cfg.attackCadence * (0.8 + math.random() * 0.4))
@@ -996,6 +1050,13 @@ function Module.start(lib)
 	ui.toggleRow(farm, "Aggressive range (pull target to you)",
 		function() return cfg.aggressiveRange end,
 		function(v) cfg.aggressiveRange = v end)
+	ui.toggleRow(farm, "Mob magnet (bring enemies to you)",
+		function() return cfg.mobBring end,
+		function(v) cfg.mobBring = v end)
+	ui.intervalRow(farm, "Mob magnet radius",
+		function() return cfg.mobBringRadius end,
+		function(v) cfg.mobBringRadius = v end,
+		{ 20, 35, 50, 75, 100, 150 })
 
 	ui.sectionLabel(farm, "TARGET FILTER")
 	ui.intervalRow(farm, "Min enemy level",
