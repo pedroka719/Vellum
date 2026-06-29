@@ -138,6 +138,9 @@ function Module.start(lib)
 	-- toggling auto-farm back ON after closing/reopening the GUI does
 	-- nothing because the loop is already dead.
 	local _running = true
+	-- Prevents re-patrolling the island on every loop iteration when the
+	-- quest mob is absent. Reset when the quest changes or enemies appear.
+	local _mobSearchCooldown = 0
 
 	-- Self-generate and register a session hash using the same formula BF's
 	-- CombatUtil uses internally (UserId chars 2-4 + thread hex chars 11-15).
@@ -667,6 +670,51 @@ function Module.start(lib)
 		cfg.farmLevelMax   = q.lvlMax + 5
 	end
 
+	-- When no quest mobs exist near the player, patrol the island at
+	-- different heights and offsets to find where they actually spawn.
+	-- The server spawns enemies only near players — if you're standing
+	-- at the portal exit (God's Guards) the Sky Bandits won't appear.
+	local function searchIslandForMob(mobName, islandPos)
+		local ch = LocalPlayer.Character
+		local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+		if not hrp then return false end
+
+		-- Patrol points relative to island center, varying height and radius.
+		-- Skylands has floating platforms at multiple Y levels — we sweep
+		-- below, around, and above the main island center.
+		local offsets = {
+			{  0, -120,   0 }, {  80, -100,  80 }, { -80, -100, -80 },
+			{ 120,  -80,   0 }, { -120, -80,   0 }, {   0, -80, 120 },
+			{   0,  -80,-120 }, { 100, -130,   0 }, {-100, -130,  0 },
+			{  60,  -50,  60 }, { -60,  -50, -60 }, {   0, -150,  0 },
+		}
+
+		for _, off in ipairs(offsets) do
+			if _tpInProgress then return false end
+			local pt = Vector3.new(
+				islandPos.X + off[1],
+				islandPos.Y + off[2],
+				islandPos.Z + off[3]
+			)
+			if (hrp.Position - pt).Magnitude > 30 then
+				_tweenHRPTo(hrp, pt)
+				task.wait(1.5)
+			end
+
+			for _, e in ipairs(workspace.Enemies:GetChildren()) do
+				local ehrp = e:FindFirstChild("HumanoidRootPart")
+				local hum  = e:FindFirstChild("Humanoid")
+				if e.Name == mobName and ehrp and hum and hum.Health > 0 then
+					_tweenHRPTo(hrp, ehrp.Position + Vector3.new(0, cfg.farmHeight, 0))
+					warn("[Vellum BF] found", mobName, "at patrol offset", off[1], off[2], off[3])
+					return true
+				end
+			end
+		end
+		warn("[Vellum BF] patrol complete — no", mobName, "found at", islandPos)
+		return false
+	end
+
 	-- Callback invoked from autoFarmLoop on each death. If the kill matches
 	-- the quest mob, increment the counter.
 	local function recordQuestKill(enemyName)
@@ -920,10 +968,22 @@ function Module.start(lib)
 			-- Accept quest if not yet accepted this cycle
 			if not Q.accepted or Q.key ~= quest.questId .. "|" .. tostring(quest.tier) then
 				acceptQuest(quest)
+				if Q.accepted then
+					_mobSearchCooldown = 0
+				end
 			end
 
 			applyQuestFilters(quest)
-			jwait(3.0)
+
+			task.wait(3.0)
+			if not pickEnemy() and tick() > _mobSearchCooldown then
+				local island = ISLAND_BY_NAME[quest.island]
+				if island then
+					warn("[Vellum BF] no", quest.mob, "nearby — searching island", quest.island)
+					searchIslandForMob(quest.mob, island.pos)
+					_mobSearchCooldown = tick() + 30
+				end
+			end
 		end
 	end
 
