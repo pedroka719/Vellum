@@ -1968,12 +1968,38 @@ function Module.start(lib)
 	-- Build island ESP if enabled at boot
 	buildIslandESP()
 
+	-- Body-wide noclip refresh loop. The flight Heartbeat already keeps
+	-- HRP non-collidable each frame, but Roblox restores CanCollide on
+	-- every other BasePart (arms, legs, torso, etc), which makes the
+	-- character get wedged between a wall and an enemy during a chase.
+	-- Doing this at 60Hz removes ALL contact resistance and confused the
+	-- BP enough to thrash target selection — so we run at ~3Hz instead.
+	-- 333ms of contact between refreshes is enough for physics to settle,
+	-- and stuck recovery still happens within a second. Only runs while
+	-- auto-farm is on so toggle-off restores normal collision.
+	local function bodyNoclipLoop()
+		while _running do
+			if cfg.autoFarm and not _tpInProgress then
+				local ch = LocalPlayer.Character
+				if ch then
+					for _, p in ipairs(ch:GetDescendants()) do
+						if p:IsA("BasePart") and p.CanCollide then
+							p.CanCollide = false
+						end
+					end
+				end
+			end
+			task.wait(0.33)
+		end
+	end
+
 	-- ═══════════════════════════ KICK OFF ═══════════════════════════
 	task.spawn(autoFarmLoop)
 	task.spawn(autoFarmLevelLoop)
 	task.spawn(abilityRotationLoop)
 	task.spawn(autoStatsLoop)
 	task.spawn(trackProgressLoop)
+	task.spawn(bodyNoclipLoop)
 	antiAfkLoop()
 
 	Toast.show({
