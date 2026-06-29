@@ -1008,65 +1008,20 @@ function Module.start(lib)
 			end
 
 			-- Accept quest if not yet accepted this cycle.
-			-- CRITICAL for Skylands: the NPC is at the tower (island.pos Y=874),
-			-- NOT on the sub-zone platform (Y=277 or 440). StartQuest fails when
-			-- the player isn't near the NPC (returns 0), so we MUST tween to the
-			-- NPC FIRST, accept the quest, THEN tween to the sub-zone platform.
-			-- BF's anti-cheat tolerates downward Y snaps (>75 tolerated) but
-			-- rolls back upward snaps — so going DOWN to a platform works with
-			-- a direct Y snap + tween, but going UP to the NPC requires the
-			-- full tween (retry at 80/s if the 150/s attempt is rolled back).
+			-- StartQuest is a RemoteFunction — proximity to the NPC doesn't matter.
+			-- The Skylands-exclusive NPC tween was removed because:
+			--   1. Anti-cheat blocks upward movement to the tower (Y 874)
+			--   2. Even standing AT the NPC, StartQuest returns false success
+			--      (returns 1 but GetQuestInfo returns nil)
+			--   3. The tween oscillated the character between tower and platform
+			-- The sub-zone nav below handles Skylands platform positioning instead.
 			--
-			-- If quest acceptance recently failed (e.g. Skylands StartQuest
-			-- returns 1 without activating the quest), skip the NPC tween and
-			-- acceptQuest call for 60s to avoid spamming. Farm filters are
-			-- still applied every cycle so autoFarmLoop can try to find mobs.
+			-- If quest acceptance recently failed, skip the call for 60s to avoid
+			-- spamming. Farm filters are still applied every cycle so autoFarmLoop
+			-- can try to find mobs without quest rewards.
 			if not Q.accepted or Q.key ~= quest.questId .. "|" .. tostring(quest.tier) then
 				if tick() >= _questFailAt + 60 then
-					local gotQuest
-					if quest.island == "Skylands" then
-						local ch = LocalPlayer.Character
-						local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
-						if hrp then
-							local island = ISLAND_BY_NAME["Skylands"]
-							local npcDist = island and (hrp.Position - island.pos).Magnitude or 0
-							if npcDist > 60 then
-								-- Player is on a sub-zone platform, not at the NPC.
-								-- Tween up to the tower, accept the quest, then
-								-- tween back down to the quest platform.
-								if _hoverBP and _hoverBP.Parent then
-									_hoverBP.P, _hoverBP.D = 0, 0
-								end
-								_tweenHRPTo(hrp, island.pos + Vector3.new(0, 4, 0))
-								gotQuest = acceptQuest(quest)
-								local targetPos = SKY_SUB_ZONE[quest.mob]
-								if targetPos then
-									local yDiff = math.abs(targetPos.Y - hrp.Position.Y)
-									if yDiff > Y_SNAP_THRESHOLD then
-										hrp.CFrame = CFrame.new(hrp.Position.X, targetPos.Y, hrp.Position.Z)
-										task.wait(0.5)
-									end
-									_tweenHRPTo(hrp, targetPos)
-								end
-								if _hoverBP and _hoverBP.Parent then
-									_hoverBP.P, _hoverBP.D = 600, 80
-									_hoverBP.Position = hrp.Position
-								end
-								-- Skip the generic acceptQuest below (already handled above)
-								-- and skip the sub-zone nav already complete.
-							else
-								-- Already near the NPC — accept normally.
-								gotQuest = acceptQuest(quest)
-							end
-						else
-							gotQuest = acceptQuest(quest)
-						end
-					else
-						gotQuest = acceptQuest(quest)
-					end
-					-- If quest acceptance failed, set fail timer so we don't
-					-- spam the remote every 3 seconds. Farm filters (applied
-					-- below) let autoFarmLoop try to find mobs in the meantime.
+					local gotQuest = acceptQuest(quest)
 					if not gotQuest then
 						_questFailAt = tick()
 					end
@@ -1074,27 +1029,15 @@ function Module.start(lib)
 			end
 
 			-- Skylands sub-zone navigation: tween to the correct floating platform
-			-- for the current quest target. This runs regardless of quest acceptance
-			-- status: when the quest was just accepted (above block), the character
-			-- was already moved to the right platform, so the distance gate below
-			-- (<25) skips the redundant tween. When the quest couldn't be accepted
-			-- (Skylands false-success), this ensures the character still returns to
-			-- the correct platform instead of staying stuck at the tower.
-			-- CRITICAL: zero BP forces during the tween so BodyPosition doesn't
-			-- fight TweenService (P=600 fights every CFrame write at 60 fps).
+			-- for the current quest target. Always runs (not gated on Q.accepted)
+			-- so the character returns to the right platform even when quest
+			-- acceptance fails. The distance gate (<25) prevents redundant tweens.
 			if quest.island == "Skylands" then
 				local targetPos = SKY_SUB_ZONE[quest.mob]
 				if targetPos then
 					local ch = LocalPlayer.Character
 					local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
 					if hrp and (hrp.Position - targetPos).Magnitude > 25 then
-						local island = ISLAND_BY_NAME["Skylands"]
-						local npcDist = island and (hrp.Position - island.pos).Magnitude or 0
-						-- If we're near the NPC (just accepted), do the Y snap
-						-- (going DOWN to the platform is tolerated by anti-cheat).
-						-- If we're already on the platform (steady-state respawn),
-						-- the distance check above keeps us here.
-						-- If we're somewhere else (anti-cheat rollback), tween.
 						if _hoverBP and _hoverBP.Parent then
 							_hoverBP.P, _hoverBP.D = 0, 0
 						end
