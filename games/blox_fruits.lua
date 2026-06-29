@@ -1149,17 +1149,29 @@ function Module.start(lib)
 	-- BF uses ToolTip property to classify weapon types: Melee, Sword, Gun, Blox Fruit.
 	-- The hotbar (1/2/3/4) maps to these types. cfg.selectedWeapon stores the ToolTip
 	-- value the user wants, and we find the first backpack tool with that ToolTip.
+
+	-- A "tool" is actually equippable if it has a Handle (or explicitly opts
+	-- out via RequiresHandle=false) AND a non-empty ToolTip. BF ships an
+	-- empty "Tool" placeholder in the backpack (no Handle, no ToolTip,
+	-- RequiresHandle=false) that EquipTool silently no-ops on — picking it
+	-- as the fallback left the character empty-handed after every respawn.
+	local function _isEquippableWeapon(t)
+		if not t:IsA("Tool") then return false end
+		if not t.ToolTip or t.ToolTip == "" then return false end
+		if not t:FindFirstChild("Handle") and t.RequiresHandle then return false end
+		return true
+	end
+
 	local function ensureWeaponEquipped()
 		local ch = LocalPlayer.Character
 		if not ch then return nil end
 		local hum = ch:FindFirstChildOfClass("Humanoid")
 		local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
-		if not hum then return nil end
+		if not hum or hum.Health <= 0 then return nil end  -- skip while dead
 
-		-- Check what's already in-hand
+		-- Already holding something equippable that matches? Done.
 		local held = ch:FindFirstChildOfClass("Tool")
-		if held then
-			-- Already holding something — only re-equip if it doesn't match the selected style
+		if held and _isEquippableWeapon(held) then
 			if cfg.selectedWeapon == "" or held.ToolTip == cfg.selectedWeapon then
 				return held
 			end
@@ -1167,10 +1179,10 @@ function Module.start(lib)
 
 		if not backpack then return nil end
 
-		-- Try to equip a tool matching the selected style (by ToolTip)
+		-- Style-specific match (e.g. "Melee", "Sword", "Gun", "Blox Fruit")
 		if cfg.selectedWeapon ~= "" then
 			for _, tool in ipairs(backpack:GetChildren()) do
-				if tool:IsA("Tool") and tool.ToolTip == cfg.selectedWeapon then
+				if _isEquippableWeapon(tool) and tool.ToolTip == cfg.selectedWeapon then
 					safe(function() hum:EquipTool(tool) end)
 					task.wait(0.15)
 					return ch:FindFirstChildOfClass("Tool")
@@ -1178,12 +1190,29 @@ function Module.start(lib)
 			end
 		end
 
-		-- Fallback: first tool in backpack
-		local tool = backpack:FindFirstChildOfClass("Tool")
-		if not tool then return nil end
-		safe(function() hum:EquipTool(tool) end)
-		task.wait(0.15)
-		return ch:FindFirstChildOfClass("Tool")
+		-- Fallback: walk a Melee → Sword → Gun → Blox Fruit preference so
+		-- we always land on a real weapon. Previously this was
+		-- FindFirstChildOfClass("Tool") which returned BF's empty no-Handle
+		-- placeholder and EquipTool silently no-op'd — character ended every
+		-- respawn empty-handed and unable to attack.
+		for _, want in ipairs({ "Melee", "Sword", "Gun", "Blox Fruit" }) do
+			for _, tool in ipairs(backpack:GetChildren()) do
+				if _isEquippableWeapon(tool) and tool.ToolTip == want then
+					safe(function() hum:EquipTool(tool) end)
+					task.wait(0.15)
+					return ch:FindFirstChildOfClass("Tool")
+				end
+			end
+		end
+		-- Last resort: any tool with a Handle + ToolTip (custom style)
+		for _, tool in ipairs(backpack:GetChildren()) do
+			if _isEquippableWeapon(tool) then
+				safe(function() hum:EquipTool(tool) end)
+				task.wait(0.15)
+				return ch:FindFirstChildOfClass("Tool")
+			end
+		end
+		return nil
 	end
 
 	-- Legacy alias used by autoFarmLoop
