@@ -677,64 +677,36 @@ function Module.start(lib)
 	}
 
 	-- Accept a quest via CommF_:StartQuest and reset the kill counter.
-	-- Some quests (e.g. Skylands) reject the tier parameter and require a
-	-- bare quest ID call. If InvokeServer returns 0 (failure) with tier,
-	-- retry without it. This covers both the old and new remote signatures.
-	--
-	-- IMPORTANT: BF's StartQuest may return 1 ("success") without actually
-	-- creating a quest (e.g. Skylands). After a successful StartQuest call,
-	-- we verify by checking GetQuestInfo. If no quest is active, the caller
-	-- is informed via the return value and should still apply farm filters
-	-- (so autoFarmLoop can try to find the mob) but NOT mark Q.accepted=true
-	-- (which would skip future acceptance attempts).
-	-- Returns: true if quest was actually accepted, false otherwise.
+	-- The game's StartQuest remote returns:
+	--   0 = SUCCESS  — "Quest accepted"
+	--   1 = ERROR    — "An error has occurred" (level/req not met)
+	--   2 = DONE     — "You already completed this quest" (advance to next tier)
+	-- GetQuestInfo is NOT a valid verification (always returns nil — the game
+	-- uses QuestUpdate RemoteEvent for quest state). We trust the return code.
+	-- Returns: true if quest was accepted, false otherwise.
 	local function acceptQuest(q)
 		if not q then return false end
 		local key = q.questId .. "|" .. tostring(q.tier)
 		if Q.key == key and Q.accepted then return true end  -- already accepted
 
-		local function verifyActive()
-			local ok, info = pcall(function()
-				return R.CommF_:InvokeServer("GetQuestInfo")
-			end)
-			return ok and info ~= nil
-		end
-
 		local ok, res = pcall(function()
 			return R.CommF_:InvokeServer("StartQuest", q.questId, q.tier)
 		end)
-		local anySuccess
-		if ok and (res == 0 or res == nil) then
-			-- Tier rejected — retry without tier parameter (new signature).
-			-- Some game versions or quests require bare questId only.
-			local ok2, res2 = pcall(function()
-				return R.CommF_:InvokeServer("StartQuest", q.questId)
-			end)
-			if ok2 and res2 ~= 0 and res2 ~= nil then
-				anySuccess = true
-			else
-				warn("[Vellum BF] StartQuest failed for " .. q.questId .. " tier=" .. tostring(q.tier))
-			end
-		elseif ok then
-			anySuccess = true
-		else
-			warn("[Vellum BF] StartQuest error for " .. q.questId .. ": " .. tostring(res))
+
+		if not ok then
+			warn("[Vellum BF] StartQuest pcall error for " .. q.questId .. ": " .. tostring(res))
+			Q.accepted = false
+			Q.key      = nil
+			_questFailAt = tick()
+			return false
 		end
 
-		-- Verify the quest is actually active. Some games (Skylands) return
-		-- success from StartQuest but don't create a quest object.
-		local actuallyActive = anySuccess and verifyActive()
-		if anySuccess and not actuallyActive then
-			warn("[Vellum BF] " .. q.questId .. " StartQuest returned success but no quest " ..
-			      "active (GetQuestInfo=nil) — farming without quest rewards.")
-		end
-
-		-- Always configure farm filters so autoFarmLoop knows what to look for.
-		Q.current = q
-		Q.kills   = 0
-		if actuallyActive then
-			Q.accepted = true
-			Q.key      = key
+		if res == 0 then
+			Q.current   = q
+			Q.kills     = 0
+			Q.accepted  = true
+			Q.key       = key
+			_questFailAt = 0
 			Toast.show({
 				title = "Quest accepted",
 				body  = q.mob .. " x" .. q.taskCount .. " (Lv " .. q.lvlMin .. "-" .. q.lvlMax .. ")",
@@ -742,9 +714,16 @@ function Module.start(lib)
 				key   = "q:" .. key,
 			})
 			return true
+		elseif res == 2 then
+			Q.current   = q
+			Q.kills     = q.taskCount
+			Q.accepted  = true
+			Q.key       = key
+			_questFailAt = 0
+			return true
 		else
-			Q.accepted = false
-			Q.key      = nil
+			Q.accepted  = false
+			Q.key       = nil
 			_questFailAt = tick()
 			return false
 		end
@@ -1057,13 +1036,7 @@ function Module.start(lib)
 				end
 			end
 
-			-- Only apply quest mob filters when the quest is actually accepted.
-			-- When StartQuest returned false success (Skylands), keep farmTargetName
-			-- as-is (already cleared by the no-target fallback) so the character
-			-- can freely kill whatever enemies exist instead of idling.
-			if Q.accepted then
-				applyQuestFilters(quest)
-			end
+			applyQuestFilters(quest)
 			jwait(3.0)
 		end
 	end
