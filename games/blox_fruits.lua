@@ -138,9 +138,6 @@ function Module.start(lib)
 	-- toggling auto-farm back ON after closing/reopening the GUI does
 	-- nothing because the loop is already dead.
 	local _running = true
-	-- Prevents re-patrolling the island on every loop iteration when the
-	-- quest mob is absent. Reset when the quest changes or enemies appear.
-	local _mobSearchCooldown = 0
 
 	-- Self-generate and register a session hash using the same formula BF's
 	-- CombatUtil uses internally (UserId chars 2-4 + thread hex chars 11-15).
@@ -400,7 +397,7 @@ function Module.start(lib)
 		{ name = "Desert",          pos = Vector3.new(944.2, 20.9, 4373.3),    lvlRange = "Lv 60-89"   },
 		{ name = "Frozen Village",  pos = Vector3.new(1347.8, 104.7, -1319.7), lvlRange = "Lv 90-119"  },
 		{ name = "Marine Fortress", pos = Vector3.new(-4914.8, 51.0, 4281.0),  lvlRange = "Lv 120-149" },
-		{ name = "Skylands",        pos = Vector3.new(-4607.0, 874.0, -1667.0),lvlRange = "Lv 150-249", portal = "Sky3Exit" },
+		{ name = "Skylands",        pos = Vector3.new(-4750.0, 874.0, -2400.0),lvlRange = "Lv 150-249", portal = "Sky3Exit", atRadius = 900 },
 		{ name = "Prison",          pos = Vector3.new(4875.3, 5.7, 734.9),     lvlRange = "Lv 250-324" },
 		{ name = "Colosseum",       pos = Vector3.new(-11.3, 29.3, 2771.5),    lvlRange = "PvP"        },
 		{ name = "Magma Village",   pos = Vector3.new(-5247.7, 12.9, 8504.9),  lvlRange = "Lv 325-449" },
@@ -419,6 +416,14 @@ function Module.start(lib)
 	local PORTAL_PADS = {
 		UnderwaterExit = Vector3.new(4050, -1, -1814),    -- surface pad → Underwater City
 		Sky3Exit       = Vector3.new(-4607, 874, -1667),  -- sky portal (Skylands variant)
+	}
+
+	-- Skylands has multiple floating platforms at different Y levels. After
+	-- the portal drops you at SkyArea1 (Y~874), tween to the right platform
+	-- for the current quest mob. Keyed by SEA1_QUESTS mob name.
+	local SKY_SUB_ZONE = {
+		["Sky Bandit"]  = Vector3.new(-4948, 277, -2984),
+		["Dark Master"] = Vector3.new(-4948, 440, -2984),
 	}
 
 	-- Island TP — pisun-hub pattern, the one that actually works.
@@ -560,6 +565,29 @@ function Module.start(lib)
 			-- Bump up 50 studs so we don't immediately re-trigger the same pad
 			hrp.CFrame = hrp.CFrame + Vector3.new(0, 50, 0)
 			task.wait(1.5)  -- server completes portal warp
+
+			-- Skylands sub-zone navigation: the portal drops you at SkyArea1
+			-- (Y~874), but the mobs for your level range live on different
+			-- floating platforms. Use Data.Level to pick the right platform
+			-- and tween there.
+			if name == "Skylands" then
+				local data = LocalPlayer:FindFirstChild("Data")
+				local lvl = data and data:FindFirstChild("Level") and data.Level.Value or 0
+				local targetPos -- nil = stay at SkyArea1 (default portal drop)
+				if lvl >= 150 and lvl <= 174 then
+					targetPos = Vector3.new(-4948, 277, -2984) -- Sky Bandit island
+				elseif lvl >= 175 and lvl <= 189 then
+					targetPos = Vector3.new(-4948, 440, -2984) -- Dark Master island
+				end
+				if targetPos then
+					local yDiff = math.abs(targetPos.Y - hrp.Position.Y)
+					if yDiff > Y_SNAP_THRESHOLD then
+						hrp.CFrame = CFrame.new(hrp.Position.X, targetPos.Y, hrp.Position.Z)
+						task.wait(0.5)
+					end
+					_tweenHRPTo(hrp, targetPos)
+				end
+			end
 		else
 			local landingPos = island.pos + Vector3.new(0, 4, 0)
 			_tweenHRPTo(hrp, landingPos)
@@ -627,7 +655,8 @@ function Module.start(lib)
 		if not hrp then return false end
 		local dx = hrp.Position.X - island.pos.X
 		local dz = hrp.Position.Z - island.pos.Z
-		return math.sqrt(dx * dx + dz * dz) < 350
+		local radius = island.atRadius or 350
+		return math.sqrt(dx * dx + dz * dz) < radius
 	end
 
 	-- ═══════════════════════════ QUEST LIFECYCLE ═══════════════════════════
@@ -668,51 +697,6 @@ function Module.start(lib)
 		cfg.farmTargetName = q.mob
 		cfg.farmLevelMin   = q.lvlMin
 		cfg.farmLevelMax   = q.lvlMax + 5
-	end
-
-	-- When no quest mobs exist near the player, patrol the island at
-	-- different heights and offsets to find where they actually spawn.
-	-- The server spawns enemies only near players — if you're standing
-	-- at the portal exit (God's Guards) the Sky Bandits won't appear.
-	local function searchIslandForMob(mobName, islandPos)
-		local ch = LocalPlayer.Character
-		local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
-		if not hrp then return false end
-
-		-- Patrol points relative to island center, varying height and radius.
-		-- Skylands has floating platforms at multiple Y levels — we sweep
-		-- below, around, and above the main island center.
-		local offsets = {
-			{  0, -120,   0 }, {  80, -100,  80 }, { -80, -100, -80 },
-			{ 120,  -80,   0 }, { -120, -80,   0 }, {   0, -80, 120 },
-			{   0,  -80,-120 }, { 100, -130,   0 }, {-100, -130,  0 },
-			{  60,  -50,  60 }, { -60,  -50, -60 }, {   0, -150,  0 },
-		}
-
-		for _, off in ipairs(offsets) do
-			if _tpInProgress then return false end
-			local pt = Vector3.new(
-				islandPos.X + off[1],
-				islandPos.Y + off[2],
-				islandPos.Z + off[3]
-			)
-			if (hrp.Position - pt).Magnitude > 30 then
-				_tweenHRPTo(hrp, pt)
-				task.wait(1.5)
-			end
-
-			for _, e in ipairs(workspace.Enemies:GetChildren()) do
-				local ehrp = e:FindFirstChild("HumanoidRootPart")
-				local hum  = e:FindFirstChild("Humanoid")
-				if e.Name == mobName and ehrp and hum and hum.Health > 0 then
-					_tweenHRPTo(hrp, ehrp.Position + Vector3.new(0, cfg.farmHeight, 0))
-					warn("[Vellum BF] found", mobName, "at patrol offset", off[1], off[2], off[3])
-					return true
-				end
-			end
-		end
-		warn("[Vellum BF] patrol complete — no", mobName, "found at", islandPos)
-		return false
 	end
 
 	-- Callback invoked from autoFarmLoop on each death. If the kill matches
@@ -938,7 +922,7 @@ function Module.start(lib)
 				Q.kills = 0
 				Q.current = nil
 				Q.key = nil
-				_islandGraceUntil = 0
+				_islandGraceUntil = tick() + 60
 				currentTarget = nil
 				targetOriginalY = nil
 				jwait(0.5)
@@ -965,25 +949,31 @@ function Module.start(lib)
 				_islandGraceName = quest.island
 			end
 
+			-- Skylands sub-zone navigation: after portal drop, respawn, or grace
+			-- expiry, tween to the correct floating platform for the quest mob.
+			if quest.island == "Skylands" then
+				local targetPos = SKY_SUB_ZONE[quest.mob]
+				if targetPos then
+					local ch = LocalPlayer.Character
+					local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+					if hrp and (hrp.Position - targetPos).Magnitude > 100 then
+						local yDiff = math.abs(targetPos.Y - hrp.Position.Y)
+						if yDiff > Y_SNAP_THRESHOLD then
+							hrp.CFrame = CFrame.new(hrp.Position.X, targetPos.Y, hrp.Position.Z)
+							task.wait(0.5)
+						end
+						_tweenHRPTo(hrp, targetPos)
+					end
+				end
+			end
+
 			-- Accept quest if not yet accepted this cycle
 			if not Q.accepted or Q.key ~= quest.questId .. "|" .. tostring(quest.tier) then
 				acceptQuest(quest)
-				if Q.accepted then
-					_mobSearchCooldown = 0
-				end
 			end
 
 			applyQuestFilters(quest)
-
-			task.wait(3.0)
-			if not pickEnemy() and tick() > _mobSearchCooldown then
-				local island = ISLAND_BY_NAME[quest.island]
-				if island then
-					warn("[Vellum BF] no", quest.mob, "nearby — searching island", quest.island)
-					searchIslandForMob(quest.mob, island.pos)
-					_mobSearchCooldown = tick() + 30
-				end
-			end
+			jwait(3.0)
 		end
 	end
 
