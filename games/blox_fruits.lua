@@ -421,25 +421,55 @@ function Module.start(lib)
 		Sky3Exit       = Vector3.new(-4607, 874, -1667),  -- sky portal (Skylands variant)
 	}
 
-	-- Generic sub-zone discovery: instead of hardcoded per-island platform
-	-- coords, scan workspace.Enemies for the quest mob and return the centroid
-	-- of all alive matches. Works on ANY island with platforms (Skylands,
-	-- Prison floors, etc) without per-quest config. Returns nil if no live
-	-- matches — caller falls back to island.pos to trigger spawns.
+	-- Generic sub-zone discovery: returns the spawn centroid for a mob.
+	-- Two-pass search so this handles BOTH:
+	--   (a) "We're already there" — alive mobs in workspace.Enemies → take
+	--       the centroid of live ones. Tracks mob drift through the zone.
+	--   (b) "We just TP'd in and mobs haven't spawned yet" — BF only spawns
+	--       enemies when a player is near the spawn anchor. Without alive
+	--       mobs there's no centroid to navigate to, so we fall back to
+	--       _WorldOrigin.EnemySpawns, BF's static spawn-anchor folder.
+	--       Names are like "Toga Warrior [Lv. 250]" — match by prefix.
+	-- This solves the Toga Warrior bug (and any future quest where the
+	-- mob's sub-zone is far from the island.pos): atlas says island="Prison"
+	-- but real Toga Warriors live at (-1800, 7, -2800) in the Colosseum
+	-- sub-island. We tp to Prison.pos, find 0 alive Togas, then this
+	-- function returns the EnemySpawns centroid (-1900, 7, -2750) and the
+	-- caller snaps us into spawn range.
 	local function discoverSubZone(mobName)
+		-- Pass A: live mobs (fast path — most common during steady-state farm)
 		local enemies = workspace:FindFirstChild("Enemies")
-		if not enemies then return nil end
-		local sx, sy, sz, n = 0, 0, 0, 0
-		for _, e in ipairs(enemies:GetChildren()) do
-			if e.Name == mobName then
-				local eh = e:FindFirstChild("HumanoidRootPart")
-				local h  = e:FindFirstChild("Humanoid")
-				if eh and h and h.Health > 0 then
-					sx = sx + eh.Position.X
-					sy = sy + eh.Position.Y
-					sz = sz + eh.Position.Z
-					n  = n + 1
+		if enemies then
+			local sx, sy, sz, n = 0, 0, 0, 0
+			for _, e in ipairs(enemies:GetChildren()) do
+				if e.Name == mobName then
+					local eh = e:FindFirstChild("HumanoidRootPart")
+					local h  = e:FindFirstChild("Humanoid")
+					if eh and h and h.Health > 0 then
+						sx = sx + eh.Position.X
+						sy = sy + eh.Position.Y
+						sz = sz + eh.Position.Z
+						n  = n + 1
+					end
 				end
+			end
+			if n > 0 then return Vector3.new(sx / n, sy / n, sz / n) end
+		end
+
+		-- Pass B: static spawn anchors. BF stores these at
+		-- workspace._WorldOrigin.EnemySpawns with names of the form
+		-- "<mob name> [Lv. NNN]". We strip the suffix and match by mob.
+		local origin = workspace:FindFirstChild("_WorldOrigin")
+		local spawns = origin and origin:FindFirstChild("EnemySpawns")
+		if not spawns then return nil end
+		local sx, sy, sz, n = 0, 0, 0, 0
+		local prefix = mobName .. " [Lv."
+		for _, p in ipairs(spawns:GetChildren()) do
+			if p:IsA("BasePart") and p.Name:sub(1, #prefix) == prefix then
+				sx = sx + p.Position.X
+				sy = sy + p.Position.Y
+				sz = sz + p.Position.Z
+				n  = n + 1
 			end
 		end
 		if n == 0 then return nil end
@@ -1169,8 +1199,22 @@ function Module.start(lib)
 				if nearestDist > 400 then
 					local centroid = discoverSubZone(quest.mob)
 					if centroid then
+						local dest = centroid + Vector3.new(0, 6, 0)
+						local snapDist = (dest - hrp.Position).Magnitude
 						hoverEnabled = false
-						hrp.CFrame = CFrame.new(centroid + Vector3.new(0, 6, 0))
+						-- Short snap (under 1000 studs) → direct CFrame is
+						-- fine, BF accepts it for in-island sub-zone moves.
+						-- Long snap (>= 1000 studs) → use the segmented
+						-- tween from tpToIsland, which BF anti-cheat
+						-- tolerates up to 60K studs (verified live). This
+						-- handles cases like Toga Warriors, whose spawn
+						-- anchors are in the Colosseum sub-island ~8K
+						-- studs from the Prison "island.pos" we tp'd to.
+						if snapDist < 1000 then
+							hrp.CFrame = CFrame.new(dest)
+						else
+							safe(function() _tweenHRPTo(hrp, dest) end)
+						end
 						task.wait(0.4)
 						if _hoverBP and _hoverBP.Parent then
 							_hoverBP.Position = hrp.Position
