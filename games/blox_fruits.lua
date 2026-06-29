@@ -91,6 +91,13 @@ function Module.start(lib)
 		snipeMaxDist     = 5000,     -- don't fly past this for a fruit
 		snipeSkipCommons = true,     -- ignore Bomb/Spike/Spring/etc
 
+		-- shop — auto-buy from Blox Fruit Dealer when a sniped fruit
+		-- enters the on-sale rotation. Manual buy buttons cover weapons,
+		-- styles, haki, boats (one-click TP-to-NPC + BuyItem + TP back).
+		dealerSniper     = false,    -- master switch for dealer auto-buy
+		dealerSnipeList  = {},       -- { ["Mera-Mera"] = true, ... }
+		shopRequireConfirm = true,   -- toast confirm before any buy fires
+
 		-- visuals / ESP
 		espIslands   = true,         -- billboard names over each island
 		espPlayers   = false,        -- card with name·lv / race·fruit / HP bar
@@ -1501,6 +1508,127 @@ function Module.start(lib)
 		end)
 	end
 
+	-- ═══════════════════════════ SHOP ═══════════════════════════
+	-- Canonical NPC positions from ReplicatedStorage.NPCs.<name>.FloorPos
+	-- (the attribute BF uses to position NPCs after the world loads).
+	-- Hardcoded because StreamingEnabled hides distant NPCs from workspace
+	-- — we can't find them via workspace scan unless we're already there.
+	local NPC_LOCATIONS = {
+		BloxFruitDealer       = Vector3.new(-921, 6, 1608),     -- Middle Town
+		WeaponDealer          = Vector3.new(-699, 7, 1516),     -- Middle Town
+		SwordDealer           = Vector3.new(-2538, 5, 2027),    -- Marine Starter
+		SwordDealerWest       = Vector3.new(-1277, 12, 3985),   -- Pirate Village
+		SwordDealerEast       = Vector3.new(1432, 86, -1388),   -- Frozen Village
+		MasterSwordDealer     = Vector3.new(-4748, 716, -2654), -- Skylands
+		AdvancedWeaponDealer  = Vector3.new(-5000, 40, 4402),   -- Marine Fortress
+		Blacksmith            = Vector3.new(-1097, 14, 4009),   -- Pirate Village
+		DarkStepTeacher       = Vector3.new(-984, 12, 3990),    -- Pirate Village
+		WaterKungFuTeacher    = Vector3.new(61587, 20, 988),    -- Underwater City
+		AbilityTeacher        = Vector3.new(1489, 36, -1413),   -- Frozen Village
+		InstinctTeacher       = Vector3.new(-8037, 5755, -1929),-- Skylands tower top
+		BoatDealer            = Vector3.new(-393, 1, 1546),     -- Middle Town
+		LuxuryBoatDealer      = Vector3.new(-2534, 3, 1841),    -- Marine Starter
+	}
+
+	-- TP-buy-TP routine. Reuses fruit sniper's safety pattern:
+	-- pause autoFarm, teardown flight, segmented tween to NPC, fire BuyItem,
+	-- segmented tween back, restart flight. Saves & restores user position
+	-- so the script doesn't lose the farm spot.
+	--   npcKey   — index into NPC_LOCATIONS
+	--   item     — exact item string the server expects (e.g. "Triple Katana")
+	--   displayName — for the toast (defaults to item)
+	-- Returns true on success (server returned 0 or 1).
+	local function shopBuy(npcKey, item, displayName)
+		local pos = NPC_LOCATIONS[npcKey]
+		if not pos then
+			Toast.show({ title = "Shop error", body = "Unknown NPC: " .. tostring(npcKey),
+				kind = "warn", duration = 4 })
+			return false
+		end
+		local ch = LocalPlayer.Character
+		local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+		if not hrp then return false end
+		local returnPos = hrp.Position
+
+		Toast.show({
+			title = "Buying", body = (displayName or item) .. "  →  " .. npcKey,
+			kind = "info", duration = 3, key = "shop:" .. item,
+		})
+
+		_tpInProgress = true
+		local restoreAutoFarm = cfg.autoFarm
+		local restoreAutoFL   = cfg.autoFarmLevel
+		cfg.autoFarm = false
+		cfg.autoFarmLevel = false
+		safe(_stopFlightFn)
+
+		-- Go to NPC
+		safe(function() _tweenHRPTo(hrp, pos + Vector3.new(0, 4, 0)) end)
+		task.wait(0.5)
+
+		-- Fire purchase
+		local ok, res = pcall(function()
+			return R.CommF_:InvokeServer("BuyItem", item)
+		end)
+		task.wait(0.3)
+
+		-- Go home
+		safe(function() _tweenHRPTo(hrp, returnPos) end)
+		task.wait(0.4)
+
+		_tpInProgress = false
+		cfg.autoFarm = restoreAutoFarm
+		cfg.autoFarmLevel = restoreAutoFL
+		safe(startFlight)
+
+		local resStr = tostring(res)
+		local success = ok and (resStr == "0" or resStr == "1")
+		Toast.show({
+			title = success and "Bought" or "Buy failed",
+			body  = (displayName or item) .. (success and "" or ("  •  code " .. resStr)),
+			kind  = success and "success" or "warn", duration = 4,
+			key   = "shop:done:" .. item,
+		})
+		return success
+	end
+
+	-- Fruit dealer auto-sniper. Polls GetFruits every 30s. When any fruit
+	-- in cfg.dealerSnipeList enters the OnSale=true rotation, fires
+	-- shopBuy via the BloxFruitDealer NPC. Only one buy per rotation
+	-- (BF refreshes the rotation periodically and we don't want to
+	-- ping-pong on the same fruit if BuyItem returns code 1).
+	local _dealerLastRotation = ""
+	task.spawn(function()
+		while _running do
+			task.wait(30)
+			if cfg.dealerSniper and next(cfg.dealerSnipeList) then
+				local ok, fruits = pcall(function()
+					return R.CommF_:InvokeServer("GetFruits")
+				end)
+				if ok and type(fruits) == "table" then
+					-- Build a rotation signature to avoid re-buying same slot
+					local sig = ""
+					for _, f in pairs(fruits) do
+						if f.OnSale then sig = sig .. f.Name .. "|" end
+					end
+					if sig ~= _dealerLastRotation then
+						_dealerLastRotation = sig
+						for _, f in pairs(fruits) do
+							if f.OnSale and cfg.dealerSnipeList[f.Name] then
+								local price = tonumber(f.Price) or 0
+								local beli = LocalPlayer.Data and LocalPlayer.Data.Beli and LocalPlayer.Data.Beli.Value or 0
+								if beli >= price then
+									shopBuy("BloxFruitDealer", f.Name, f.Name:gsub("-", " "))
+									task.wait(2)  -- gap between back-to-back snipes
+								end
+							end
+						end
+					end
+				end
+			end
+		end
+	end)
+
 	-- ═══════════════════════════ LOOPS ═══════════════════════════
 
 	-- One always-on flight connection while auto-farm is enabled. Picks
@@ -2533,6 +2661,125 @@ function Module.start(lib)
 		{ min = 0, max = 5000, step = 50,
 		  format = function(v) return v == 0 and "off" or (tostring(v) .. " st") end })
 
+	-- ─── SHOP TAB ───
+	-- One-click TP-buy-TP from any NPC in the game without ever leaving
+	-- the auto-farm spot. shopBuy handles the safe segmented tween +
+	-- flight teardown + restore pattern under the hood.
+	local shopTab = ui.newPage("shop")
+
+	-- Fruit Dealer — live rotation panel + per-fruit snipe checkboxes.
+	-- Curated to the ~14 most-wanted fruits (Rarity 3+ + a few high-value
+	-- Rarity 2). Full 41-fruit list would bloat the tab.
+	ui.sectionLabel(shopTab, "FRUIT DEALER")
+	ui.toggleRow(shopTab, "Auto-snipe selected fruits when on sale",
+		function() return cfg.dealerSniper end,
+		function(v) cfg.dealerSniper = v end)
+
+	local rotationLbl = Instance.new("TextLabel", shopTab)
+	rotationLbl.Size = UDim2.new(1, -16, 0, 64)
+	rotationLbl.Position = UDim2.fromOffset(8, 0)
+	rotationLbl.BackgroundTransparency = 1
+	rotationLbl.Font = Enum.Font.RobotoMono; rotationLbl.TextSize = 11
+	Theme.bind(rotationLbl, "TextColor3", "text")
+	rotationLbl.TextXAlignment = Enum.TextXAlignment.Left
+	rotationLbl.TextYAlignment = Enum.TextYAlignment.Top
+	rotationLbl.Text = "  Loading dealer rotation..."
+	task.spawn(function()
+		while _running do
+			local ok, fruits = pcall(function() return R.CommF_:InvokeServer("GetFruits") end)
+			if ok and type(fruits) == "table" then
+				local lines = { "  ON SALE NOW:" }
+				for _, f in pairs(fruits) do
+					if f.OnSale then
+						table.insert(lines, string.format("    %s  •  %s Beli",
+							f.Name:gsub("-", " "), Helpers.fmt(tonumber(f.Price) or 0)))
+					end
+				end
+				rotationLbl.Text = table.concat(lines, "\n")
+			end
+			task.wait(30)
+		end
+	end)
+
+	local SNIPE_FRUITS = {
+		"Light-Light", "Magma-Magma", "Quake-Quake", "Buddha-Buddha",
+		"Love-Love", "Phoenix-Phoenix", "Sound-Sound", "Portal-Portal",
+		"Dough-Dough", "Shadow-Shadow", "Venom-Venom", "Spirit-Spirit",
+		"Dragon-Dragon", "Kitsune-Kitsune",
+	}
+	for _, fid in ipairs(SNIPE_FRUITS) do
+		ui.toggleRow(shopTab, "  Snipe " .. fid:gsub("-", " "),
+			function() return cfg.dealerSnipeList[fid] == true end,
+			function(v) cfg.dealerSnipeList[fid] = v or nil end)
+	end
+
+	-- Weapons section. Curated to the top swords/guns/melee + their
+	-- assigned dealer. Pulled from BF wiki + WeaponData. Buy fires
+	-- BuyItem with the in-game name (case-sensitive). Returns code 1
+	-- if already owned, 0 on fresh purchase, 2 on failure.
+	ui.sectionLabel(shopTab, "SWORDS")
+	for _, w in ipairs({
+		{ "Cutlass",        "SwordDealer"    },
+		{ "Katana",         "SwordDealer"    },
+		{ "Iron Mace",      "SwordDealer"    },
+		{ "Dual Katana",    "SwordDealerWest"},
+		{ "Triple Katana",  "SwordDealerEast"},
+		{ "Bisento",        "MasterSwordDealer" },
+		{ "Pole",           "MasterSwordDealer" },
+		{ "Soul Cane",      "MasterSwordDealer" },
+		{ "Saber",          "MasterSwordDealer" },
+	}) do
+		ui.actionBtn(shopTab, "  Buy " .. w[1], function() shopBuy(w[2], w[1], w[1]) end)
+	end
+
+	ui.sectionLabel(shopTab, "GUNS")
+	for _, w in ipairs({
+		{ "Slingshot",   "WeaponDealer"        },
+		{ "Musket",      "WeaponDealer"        },
+		{ "Flintlock",   "WeaponDealer"        },
+		{ "Refined Slingshot", "WeaponDealer"  },
+		{ "Refined Flintlock", "WeaponDealer"  },
+		{ "Cannon",      "AdvancedWeaponDealer"},
+		{ "Bazooka",     "AdvancedWeaponDealer"},
+		{ "Acidum Rifle","AdvancedWeaponDealer"},
+	}) do
+		ui.actionBtn(shopTab, "  Buy " .. w[1], function() shopBuy(w[2], w[1], w[1]) end)
+	end
+
+	ui.sectionLabel(shopTab, "FIGHT STYLES")
+	for _, s in ipairs({
+		{ "Black Leg",       "AbilityTeacher"       },
+		{ "Electro",         "AbilityTeacher"       },
+		{ "Fishman Karate",  "AbilityTeacher"       },
+		{ "Dragon Claw",     "AbilityTeacher"       },
+		{ "Superhuman",      "AbilityTeacher"       },
+		{ "Death Step",      "AbilityTeacher"       },
+		{ "Sharkman Karate", "WaterKungFuTeacher"   },
+		{ "Dark Step",       "DarkStepTeacher"      },
+		{ "Water Kung-Fu",   "WaterKungFuTeacher"   },
+	}) do
+		ui.actionBtn(shopTab, "  Learn " .. s[1], function() shopBuy(s[2], s[1], s[1]) end)
+	end
+
+	ui.sectionLabel(shopTab, "HAKI")
+	ui.actionBtn(shopTab, "  Learn Observation Haki", function()
+		shopBuy("InstinctTeacher", "Observation", "Observation Haki")
+	end)
+	ui.actionBtn(shopTab, "  Learn Buso Haki", function()
+		shopBuy("AbilityTeacher", "Buso", "Buso Haki")
+	end)
+
+	ui.sectionLabel(shopTab, "BOATS")
+	for _, b in ipairs({
+		{ "Rowboat",       "BoatDealer"        },
+		{ "Plank Raft",    "BoatDealer"        },
+		{ "Brigade",       "LuxuryBoatDealer"  },
+		{ "Lantern Boat",  "LuxuryBoatDealer"  },
+		{ "The Swan",      "LuxuryBoatDealer"  },
+	}) do
+		ui.actionBtn(shopTab, "  Buy " .. b[1], function() shopBuy(b[2], b[1], b[1]) end)
+	end
+
 	-- ─── STATS TAB ───
 	local statsPage = ui.newPage("stats")
 	ui.sectionLabel(statsPage, "AUTO STAT ALLOCATION")
@@ -2606,8 +2853,9 @@ function Module.start(lib)
 	ui.newTab("farm",     "Farm",     1)
 	ui.newTab("sea1",     "Sea 1",    2)
 	ui.newTab("visuals",  "Visuals",  3)
-	ui.newTab("stats",    "Stats",    4)
-	ui.newTab("settings", "Settings", 5)
+	ui.newTab("shop",     "Shop",     4)
+	ui.newTab("stats",    "Stats",    5)
+	ui.newTab("settings", "Settings", 6)
 	ui.setActiveTab("farm")
 
 	local function makeFloatingIcon()
