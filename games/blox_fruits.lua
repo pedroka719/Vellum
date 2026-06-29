@@ -97,6 +97,7 @@ function Module.start(lib)
 		spyEnabled = true,
 		spyBufferSize = 200,        -- rolling log size
 		notifyInGame = true,        -- toast notifications
+		keybindToggle = true,       -- RightShift toggles UI minimize
 	}
 
 	-- ═══════════════════════════ STATE ═══════════════════════════
@@ -1548,6 +1549,55 @@ function Module.start(lib)
 	ui.newTab("stats",    "Stats",    3)
 	ui.newTab("settings", "Settings", 4)
 	ui.setActiveTab("farm")
+
+	local function makeFloatingIcon()
+		local icon = Instance.new("TextButton", ui.gui)
+		icon.Size = UDim2.fromOffset(50, 50); icon.Position = UDim2.fromOffset(20, 100)
+		Theme.bind(icon, "BackgroundColor3", "panel"); icon.AutoButtonColor = false
+		icon.Text = "V"; icon.Font = Enum.Font.Antique; icon.TextSize = 22
+		Theme.bind(icon, "TextColor3", "accent"); icon.Active = true; icon.Draggable = true
+		Instance.new("UICorner", icon).CornerRadius = UDim.new(1, 0)
+		local s = Instance.new("UIStroke", icon)
+		Theme.bind(s, "Color", "accent"); s.Thickness = 1.4; s.Transparency = 0.35
+
+		task.spawn(function()
+			while icon.Parent do
+				local fade = TweenService:Create(s,
+					TweenInfo.new(0.9, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true),
+					{ Transparency = 0.75, Thickness = 2.4 })
+				fade:Play()
+				while icon.Parent do task.wait(0.2) end
+				fade:Cancel()
+				s.Transparency = 0.35; s.Thickness = 1.4
+			end
+		end)
+
+		icon.MouseButton1Click:Connect(function()
+			ui.root.Visible = true
+			icon:Destroy()
+		end)
+		return icon
+	end
+
+	ui.minBtn.MouseButton1Click:Connect(function()
+		ui.root.Visible = false
+		makeFloatingIcon()
+	end)
+
+	UserInputService.InputBegan:Connect(function(input, processed)
+		if processed or not cfg.keybindToggle then return end
+		if input.KeyCode == Enum.KeyCode.RightShift then
+			if ui.root.Visible then
+				ui.root.Visible = false
+				if not ui.gui:FindFirstChildOfClass("TextButton") then makeFloatingIcon() end
+			else
+				ui.root.Visible = true
+				for _, c in ipairs(ui.gui:GetChildren()) do
+					if c:IsA("TextButton") then c:Destroy() end
+				end
+			end
+		end
+	end)
 
 	-- Build island ESP if enabled at boot
 	buildIslandESP()

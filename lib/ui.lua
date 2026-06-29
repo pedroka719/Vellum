@@ -162,7 +162,7 @@ function UI.mount(opts)
 		gui:Destroy()
 	end)
 
-	-- minimize – (caller wires the visibility-toggle behavior)
+	-- minimize — caller wires click via ui.minBtn
 	local minBtn = Instance.new("TextButton", header)
 	minBtn.Size = UDim2.fromOffset(22, 22); minBtn.Position = UDim2.new(1, -60, 0, 14)
 	minBtn.BackgroundTransparency = 1; minBtn.Text = "–"
@@ -170,9 +170,6 @@ function UI.mount(opts)
 	Theme.bind(minBtn, "TextColor3", "textDim"); minBtn.AutoButtonColor = false
 	minBtn.MouseEnter:Connect(function() minBtn.TextColor3 = Theme.token("accent") end)
 	minBtn.MouseLeave:Connect(function() minBtn.TextColor3 = Theme.token("textDim") end)
-	minBtn.MouseButton1Click:Connect(function()
-		root.Visible = not root.Visible
-	end)
 
 	-- ─── sidebar (flat list, accent strip marks active) ───
 	local sidebar = Instance.new("Frame", root)
