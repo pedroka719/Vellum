@@ -2222,24 +2222,25 @@ function Module.start(lib)
 				cfg.autoFarm = false
 			end
 		end)
-	ui.intervalRow(farm, "Attack cadence (sec)",
+	ui.sliderRow(farm, "Attack cadence (sec)",
 		function() return cfg.attackCadence end,
 		function(v) cfg.attackCadence = v end,
-		{ 0.12, 0.15, 0.18, 0.22, 0.30 })
-	ui.intervalRow(farm, "Hover height (studs)",
+		{ min = 0.05, max = 1.0, step = 0.01,
+		  format = function(v) return string.format("%.2fs", v) end })
+	ui.sliderRow(farm, "Hover height (studs)",
 		function() return cfg.farmHeight end,
 		function(v) cfg.farmHeight = v end,
-		{ 6, 10, 14, 20, 30, 50 })
+		{ min = 0, max = 100, step = 1 })
 	ui.toggleRow(farm, "Aggressive range (pull target to you)",
 		function() return cfg.aggressiveRange end,
 		function(v) cfg.aggressiveRange = v end)
 	ui.toggleRow(farm, "Mob magnet (bring enemies to you)",
 		function() return cfg.mobBring end,
 		function(v) cfg.mobBring = v end)
-	ui.intervalRow(farm, "Mob magnet radius",
+	ui.sliderRow(farm, "Mob magnet radius",
 		function() return cfg.mobBringRadius end,
 		function(v) cfg.mobBringRadius = v end,
-		{ 20, 35, 50, 75, 100, 150 })
+		{ min = 10, max = 250, step = 5, suffix = " st" })
 
 	ui.sectionLabel(farm, "WEAPON STYLE")
 	local weaponStyles = getWeaponOptions()
@@ -2267,20 +2268,21 @@ function Module.start(lib)
 	ui.toggleRow(farm, "F",
 		function() return cfg.abilitySlots.F end,
 		function(v) cfg.abilitySlots.F = v end)
-	ui.intervalRow(farm, "Ability cadence (sec)",
+	ui.sliderRow(farm, "Ability cadence (sec)",
 		function() return cfg.abilityCadence end,
 		function(v) cfg.abilityCadence = v end,
-		{ 1.0, 1.5, 2.0, 3.0, 5.0 })
+		{ min = 0.5, max = 10, step = 0.1,
+		  format = function(v) return string.format("%.1fs", v) end })
 
 	ui.sectionLabel(farm, "TARGET FILTER")
-	ui.intervalRow(farm, "Min enemy level",
+	ui.sliderRow(farm, "Min enemy level",
 		function() return cfg.farmLevelMin end,
 		function(v) cfg.farmLevelMin = v end,
-		{ 0, 5, 10, 25, 50, 100 })
-	ui.intervalRow(farm, "Max enemy level",
+		{ min = 0, max = 9999, step = 1 })
+	ui.sliderRow(farm, "Max enemy level",
 		function() return cfg.farmLevelMax end,
 		function(v) cfg.farmLevelMax = v end,
-		{ 25, 50, 100, 250, 500, 9999 })
+		{ min = 0, max = 9999, step = 1 })
 
 	-- ─── SEA 1 TAB ───
 	-- Manual TP only. ESP toggles live on the Visuals tab.
@@ -2343,10 +2345,11 @@ function Module.start(lib)
 	ui.toggleRow(visuals, "Tracer lines from screen-center",
 		function() return cfg.espTracers end,
 		function(v) cfg.espTracers = v end)
-	ui.intervalRow(visuals, "Max distance (0 = unlimited)",
+	ui.sliderRow(visuals, "Max distance",
 		function() return cfg.espMaxDist end,
 		function(v) cfg.espMaxDist = v end,
-		{ 0, 250, 500, 1000, 2500, 5000 })
+		{ min = 0, max = 5000, step = 50,
+		  format = function(v) return v == 0 and "off" or (tostring(v) .. " st") end })
 
 	-- ─── STATS TAB ───
 	local statsPage = ui.newPage("stats")

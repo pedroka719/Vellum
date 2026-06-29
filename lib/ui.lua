@@ -415,6 +415,179 @@ function UI.mount(opts)
 		return r
 	end
 
+	-- Slider row — horizontal track + draggable fill + typeable number box.
+	-- Replaces intervalRow when the user wants continuous control over a
+	-- numeric value instead of cycling preset bumps.
+	--
+	-- Usage:
+	--   ui.sliderRow(parent, "Max distance",
+	--     function() return cfg.espMaxDist end,
+	--     function(v) cfg.espMaxDist = v end,
+	--     { min = 0, max = 5000, step = 50, format = function(v) return v == 0 and "off" or tostring(v) end })
+	--
+	-- opts:
+	--   min     (number, default 0)
+	--   max     (number, default 100)
+	--   step    (number, default 1 — quantizes both drag and typed input)
+	--   format  (function(v) → string, default tostring; controls box display)
+	--   suffix  (string, optional shorthand for `format = v..suffix`)
+	--
+	-- Security: text input is sanitized to digits/dash/dot only and clamped
+	-- to [min, max] before commit. Out-of-range or non-numeric input is
+	-- rejected and the box repaints to the last committed value.
+	function Builder.sliderRow(parent, labelText, getF, setF, opts)
+		opts = opts or {}
+		local min  = opts.min  or 0
+		local max  = opts.max  or 100
+		local step = opts.step or 1
+		local fmt  = opts.format or (opts.suffix
+			and function(v) return tostring(v) .. opts.suffix end
+			or  function(v) return tostring(v) end)
+
+		local r = Builder.row(parent, 38)
+
+		-- Label (left ~45% of row)
+		local l = Instance.new("TextLabel", r)
+		l.Size = UDim2.new(0, 130, 1, 0); l.Position = UDim2.fromOffset(12, 0)
+		l.BackgroundTransparency = 1; l.Text = labelText
+		l.Font = Enum.Font.Gotham; l.TextSize = 12
+		Theme.bind(l, "TextColor3", "text"); l.TextXAlignment = Enum.TextXAlignment.Left
+
+		-- Number box (right-aligned, fixed width)
+		local box = Instance.new("TextBox", r)
+		box.Size = UDim2.fromOffset(62, 22); box.Position = UDim2.new(1, -74, 0.5, -11)
+		Theme.bind(box, "BackgroundColor3", "elev")
+		box.Font = Enum.Font.RobotoMono; box.TextSize = 11
+		Theme.bind(box, "TextColor3", "text"); box.ClearTextOnFocus = false
+		box.TextXAlignment = Enum.TextXAlignment.Center
+		Instance.new("UICorner", box).CornerRadius = UDim.new(0, 4)
+		local boxStroke = Instance.new("UIStroke", box)
+		Theme.bind(boxStroke, "Color", "stroke"); boxStroke.Thickness = 1; boxStroke.Transparency = 0.4
+
+		-- Slider track (middle, fills remaining horizontal space between label and box)
+		local trackHolder = Instance.new("Frame", r)
+		trackHolder.Size = UDim2.new(1, -222, 0, 26)  -- 12 pad + 130 label + 80 box + spacing
+		trackHolder.Position = UDim2.new(0, 146, 0.5, -13)
+		trackHolder.BackgroundTransparency = 1
+		trackHolder.Active = true  -- so InputBegan fires reliably
+
+		local track = Instance.new("Frame", trackHolder)
+		track.Size = UDim2.new(1, 0, 0, 6); track.Position = UDim2.new(0, 0, 0.5, -3)
+		Theme.bind(track, "BackgroundColor3", "elev")
+		Instance.new("UICorner", track).CornerRadius = UDim.new(0, 3)
+		track.Active = true
+
+		local fill = Instance.new("Frame", track)
+		fill.Size = UDim2.fromScale(0, 1)
+		Theme.bind(fill, "BackgroundColor3", "accent")
+		fill.BorderSizePixel = 0
+		Instance.new("UICorner", fill).CornerRadius = UDim.new(0, 3)
+
+		-- Small accent dot at the fill edge — premium feel without a heavy handle
+		local handle = Instance.new("Frame", track)
+		handle.Size = UDim2.fromOffset(12, 12)
+		handle.AnchorPoint = Vector2.new(0.5, 0.5)
+		handle.Position = UDim2.new(0, 0, 0.5, 0)
+		Theme.bind(handle, "BackgroundColor3", "accent")
+		handle.BorderSizePixel = 0
+		Instance.new("UICorner", handle).CornerRadius = UDim.new(1, 0)
+		local handleStroke = Instance.new("UIStroke", handle)
+		handleStroke.Color = Color3.fromRGB(20, 20, 24); handleStroke.Thickness = 1.5
+
+		local function clamp(v)
+			if v < min then return min end
+			if v > max then return max end
+			return v
+		end
+
+		local function snap(v)
+			v = clamp(v)
+			if step > 0 then
+				v = math.floor((v - min) / step + 0.5) * step + min
+				v = clamp(v)
+			end
+			return v
+		end
+
+		local function paint()
+			local v = clamp(getF() or min)
+			local pct = (max == min) and 0 or (v - min) / (max - min)
+			if pct < 0 then pct = 0 end
+			if pct > 1 then pct = 1 end
+			fill.Size = UDim2.fromScale(pct, 1)
+			handle.Position = UDim2.new(pct, 0, 0.5, 0)
+			if not box:IsFocused() then box.Text = fmt(v) end
+		end
+
+		local function commit(v)
+			v = snap(tonumber(v) or min)
+			setF(v)
+			paint()
+		end
+
+		-- Drag handling. Track + handle both listen so the user can grab
+		-- anywhere along the slider. Connections live for the lifetime of
+		-- the script — no per-row cleanup since pages aren't destroyed.
+		local dragging = false
+		local function updateFromX(absX)
+			local tx = track.AbsolutePosition.X
+			local tw = track.AbsoluteSize.X
+			if tw <= 0 then return end
+			local pct = (absX - tx) / tw
+			commit(min + (max - min) * pct)
+		end
+
+		local function down(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1
+				or input.UserInputType == Enum.UserInputType.Touch then
+				dragging = true
+				updateFromX(input.Position.X)
+			end
+		end
+		track.InputBegan:Connect(down)
+		trackHolder.InputBegan:Connect(down)
+
+		UserInputService.InputChanged:Connect(function(input)
+			if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+				or input.UserInputType == Enum.UserInputType.Touch) then
+				updateFromX(input.Position.X)
+			end
+		end)
+		UserInputService.InputEnded:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1
+				or input.UserInputType == Enum.UserInputType.Touch then
+				dragging = false
+			end
+		end)
+
+		-- Typed input. Strip everything but digits, single dash (negative),
+		-- and single dot (decimal). Reject NaN / unparseable. snap()
+		-- handles clamping so 99999999 with max=5000 lands at 5000 — no
+		-- crash, no overflow.
+		box.FocusLost:Connect(function(_enterPressed)
+			local raw = box.Text or ""
+			-- Sanitize: keep first dash and first dot only
+			local clean = raw:gsub("[^%d%.%-]", "")
+			-- Allow leading dash only at position 1
+			clean = clean:gsub("(.)(-)", "%1")
+			-- Allow only one decimal point
+			local seenDot = false
+			clean = clean:gsub(".", function(ch)
+				if ch == "." then
+					if seenDot then return "" end
+					seenDot = true
+				end
+				return ch
+			end)
+			local v = tonumber(clean)
+			if not v then paint(); return end
+			commit(v)
+		end)
+
+		paint()
+		return r
+	end
+
 	-- Dropdown row — proper menu, not inline list.
 	-- Click the pill → a floating panel pops over the UI (parented to gui,
 	-- not parent), with accent stroke, drop shadow, and a height tween on
