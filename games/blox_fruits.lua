@@ -84,8 +84,15 @@ function Module.start(lib)
 		abilitySlots = { Z = false, X = false, C = false, V = false, F = false },
 		abilityCadence = 2.0,        -- sec between ability activations
 
-		-- island ESP
-		espIslands = true,           -- billboard names over each island
+		-- visuals / ESP
+		espIslands   = true,         -- billboard names over each island
+		espPlayers   = false,        -- card with name·lv / race·fruit / HP bar
+		espChests    = false,        -- Silver/Gold/Diamond chest markers
+		espFruits    = false,        -- spawned devil fruits in workspace.Characters
+		espBosses    = false,        -- mini-bosses + named bosses, amber outline + HP
+		espQuestMob  = false,        -- current quest mob — green highlight
+		espTracers   = false,        -- Drawing.Line from screen-center to ESP targets
+		espMaxDist   = 0,            -- 0 = unlimited; otherwise hide beyond N studs
 
 		-- stat allocation
 		autoStats = false,
@@ -1890,14 +1897,8 @@ function Module.start(lib)
 		{ 25, 50, 100, 250, 500, 9999 })
 
 	-- ─── SEA 1 TAB ───
-	-- Kept for island ESP + manual TP. The old auto-progression toggle
-	-- is superseded by Auto Farm Level on the Farm tab.
+	-- Manual TP only. ESP toggles live on the Visuals tab.
 	local sea1 = ui.newPage("sea1")
-
-	ui.sectionLabel(sea1, "ISLAND ESP")
-	ui.toggleRow(sea1, "Show island markers",
-		function() return cfg.espIslands end,
-		function(v) cfg.espIslands = v; buildIslandESP() end)
 
 	ui.sectionLabel(sea1, "MANUAL TP")
 	local islandOptions = {}
@@ -1924,6 +1925,42 @@ function Module.start(lib)
 				key   = "tp:" .. name,
 			})
 		end)
+
+	-- ─── VISUALS TAB ───
+	-- All ESP toggles. Each one short-circuits its own scan loop, so
+	-- flipping a group off detaches its billboards/highlights instantly.
+	local visuals = ui.newPage("visuals")
+
+	ui.sectionLabel(visuals, "WORLD MARKERS")
+	ui.toggleRow(visuals, "Island markers",
+		function() return cfg.espIslands end,
+		function(v) cfg.espIslands = v; buildIslandESP() end)
+	ui.toggleRow(visuals, "Chests (Silver / Gold / Diamond)",
+		function() return cfg.espChests end,
+		function(v) cfg.espChests = v end)
+	ui.toggleRow(visuals, "Devil fruits on the ground",
+		function() return cfg.espFruits end,
+		function(v) cfg.espFruits = v end)
+
+	ui.sectionLabel(visuals, "ENTITIES")
+	ui.toggleRow(visuals, "Players (name·lv · race·fruit · HP bar)",
+		function() return cfg.espPlayers end,
+		function(v) cfg.espPlayers = v end)
+	ui.toggleRow(visuals, "Bosses (mini + named, HP bar)",
+		function() return cfg.espBosses end,
+		function(v) cfg.espBosses = v end)
+	ui.toggleRow(visuals, "Current quest mob (green outline)",
+		function() return cfg.espQuestMob end,
+		function(v) cfg.espQuestMob = v end)
+
+	ui.sectionLabel(visuals, "EXTRAS")
+	ui.toggleRow(visuals, "Tracer lines from screen-center",
+		function() return cfg.espTracers end,
+		function(v) cfg.espTracers = v end)
+	ui.intervalRow(visuals, "Max distance (0 = unlimited)",
+		function() return cfg.espMaxDist end,
+		function(v) cfg.espMaxDist = v end,
+		{ 0, 250, 500, 1000, 2500, 5000 })
 
 	-- ─── STATS TAB ───
 	local statsPage = ui.newPage("stats")
@@ -1997,8 +2034,9 @@ function Module.start(lib)
 
 	ui.newTab("farm",     "Farm",     1)
 	ui.newTab("sea1",     "Sea 1",    2)
-	ui.newTab("stats",    "Stats",    3)
-	ui.newTab("settings", "Settings", 4)
+	ui.newTab("visuals",  "Visuals",  3)
+	ui.newTab("stats",    "Stats",    4)
+	ui.newTab("settings", "Settings", 5)
 	ui.setActiveTab("farm")
 
 	local function makeFloatingIcon()
