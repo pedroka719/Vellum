@@ -735,18 +735,22 @@ function Module.start(lib)
 	end
 
 	-- Read the server's authoritative quest state from the Quest HUD.
-	-- Format on screen: "Defeat 8 Prisoners (2/8)" — we parse (N/M) from the
-	-- title text. This is what the server pushes to the client via QuestUpdate
-	-- (the same data BF's own quest tracker renders). Returns:
-	--   {current=N, target=M, raw="text"} when a quest is active and parseable
-	--   nil when no quest is shown OR the title can't be parsed
-	-- We DON'T extract the mob name — the local Q.current.mob is more reliable
-	-- because the HUD uses pluralized display names ("Prisoners" not "Prisoner").
+	-- The HUD frame at PlayerGui.Main.Quest has Visible=true ONLY when a
+	-- quest is currently active on the server. The Title.Text *persists*
+	-- with the last-shown value even after the quest ends (verified live:
+	-- after quest completion, Visible flipped to false but Title.Text
+	-- still read "Defeat 8 Prisoners (7/8)"). So we MUST gate on Visible,
+	-- not on whether the text parses.
+	--
+	-- Returns:
+	--   {current=N, target=M, raw=text} — quest active and parsed
+	--   nil — no quest active OR HUD structure unreadable
 	local function readServerQuest()
 		local pgui = LocalPlayer:FindFirstChild("PlayerGui")
 		local main = pgui and pgui:FindFirstChild("Main")
 		local quest = main and main:FindFirstChild("Quest")
-		local cont  = quest and quest:FindFirstChild("Container")
+		if not quest or not quest.Visible then return nil end
+		local cont  = quest:FindFirstChild("Container")
 		local qt    = cont and cont:FindFirstChild("QuestTitle")
 		local title = qt and qt:FindFirstChild("Title")
 		if not title or not title:IsA("TextLabel") then return nil end
@@ -755,6 +759,16 @@ function Module.start(lib)
 		local cur, tgt = text:match("%((%d+)%s*/%s*(%d+)%)")
 		if not cur then return nil end
 		return { current = tonumber(cur), target = tonumber(tgt), raw = text }
+	end
+
+	-- True if the HUD-displayed quest matches our target quest. Substring
+	-- match against quest.mob — the HUD pluralizes ("Prisoners" contains
+	-- "Prisoner", "Dark Masters" contains "Dark Master"), so a 1:1 string
+	-- match would fail. We can't rely on taskCount alone because multiple
+	-- quests share the same count (Prisoner=8, Dark Master=8, Bandit=...).
+	local function hudIsQuest(srv, quest)
+		if not srv or not quest then return false end
+		return srv.raw:find(quest.mob, 1, true) ~= nil
 	end
 
 	-- Kill-counter update. We keep Q.kills as a local mirror but the SERVER is
@@ -767,13 +781,21 @@ function Module.start(lib)
 		end
 	end
 
-	-- Quest complete iff the server HUD says current >= target. Falls back to
-	-- the local counter if HUD parse fails (defensive — prevents infinite loop
-	-- if PlayerGui structure changes after a game update).
+	-- Quest "complete and turned in" — used by autoFarmLevelLoop to know
+	-- when to re-accept. Two completion signals:
+	--   (a) HUD shows our quest at N >= M (caught the last frame before BF
+	--       hides the HUD — rare but possible)
+	--   (b) HUD is hidden AND we had a non-trivial kill count locally
+	--       (BF auto-completes and hides the HUD; the persistent text is
+	--       stale, so we trust local Q.kills as the post-mortem signal)
 	local function questIsComplete()
 		if not Q.current then return false end
 		local srv = readServerQuest()
-		if srv then return srv.current >= srv.target end
+		if srv and hudIsQuest(srv, Q.current) then
+			return srv.current >= srv.target
+		end
+		-- HUD hidden / unrelated quest showing — fall back to local count.
+		-- Only fires if recordQuestKill actually counted some of our kills.
 		return Q.kills >= Q.current.taskCount
 	end
 
@@ -981,25 +1003,11 @@ function Module.start(lib)
 				continue
 			end
 
-			-- Quest complete: advance to next row (pickQuest will return the next
-			-- row for the same level range, or the next tier).
-			if questIsComplete() then
-				Toast.show({
-					title = "Quest complete",
-					body  = quest.mob .. " done — moving to next tier.",
-					kind  = "info", duration = 3,
-					key   = "q:done",
-				})
-				Q.accepted = false
-				Q.kills = 0
-				Q.current = nil
-				Q.key = nil
-				_islandGraceUntil = tick() + 60
-				currentTarget = nil
-				targetOriginalY = nil
-				jwait(0.5)
-				continue
-			end
+			-- Quest completion is handled below in the HUD state machine.
+			-- The old block here used questIsComplete() which read the HUD,
+			-- but it ran BEFORE adopt and nil'd Q.current on every cycle —
+			-- which prevented re-accepting the same quest. Re-accept of the
+			-- same row is exactly what we want to keep grinding XP.
 
 			-- TP to the quest's island if we aren't there yet.
 			-- Grace period: after arriving, skip the TP check for 60s so chasing
@@ -1025,30 +1033,65 @@ function Module.start(lib)
 				_islandGraceName = quest.island
 			end
 
-			-- Sync local Q.kills with the server HUD before deciding to accept.
-			-- If the HUD shows the correct quest already active with progress,
-			-- we MUST NOT fire StartQuest again — that resets the server-side
-			-- counter. The HUD is the only place the server exposes quest
-			-- state to the client (GetQuestInfo returns nil, no Player attr).
+			-- HUD-first quest state machine. The server's truth is one of:
+			--   (a) HUD visible, mob name matches → quest active, sync N
+			--   (b) HUD visible, mob name doesn't match → wrong quest, overwrite
+			--   (c) HUD hidden → no quest active, accept
+			-- We ADOPT (a) into Q regardless of what acceptQuest told us last
+			-- time. This is critical because acceptQuest returns 1 when the
+			-- quest is already on the server, leaving Q.current=nil — which
+			-- then broke kill counting and completion detection.
 			local srv = readServerQuest()
-			if srv and Q.current then
-				Q.kills = srv.current
-				-- HUD shows the right quest with non-zero progress → trust it.
-				if srv.target == quest.taskCount and srv.current > 0 then
-					Q.accepted = true
-					Q.key = quest.questId .. "|" .. tostring(quest.tier)
-				end
+			local mine = hudIsQuest(srv, quest)
+
+			if mine then
+				Q.current  = quest
+				Q.key      = quest.questId .. "|" .. tostring(quest.tier)
+				Q.accepted = true
+				Q.kills    = srv.current
 			end
 
-			-- Accept only if the HUD says no quest is active OR the quest text
-			-- doesn't match our target's task count. StartQuest is a
-			-- RemoteFunction — proximity to the NPC doesn't matter. A 60s
-			-- backoff after a failed accept prevents spamming.
-			local needAccept = not Q.accepted
-				or Q.key ~= quest.questId .. "|" .. tostring(quest.tier)
-				or (srv == nil)                              -- no quest on HUD
-				or (srv and srv.target ~= quest.taskCount)   -- wrong quest on HUD
-			if needAccept and tick() >= _questFailAt + 60 then
+			-- Completion path A: HUD visible at N/N. Reset accepted so the
+			-- next tick re-accepts the SAME quest (pickQuest returns the
+			-- same row if level hasn't crossed a boundary — we chain the
+			-- same quest for XP until we out-level it).
+			if mine and srv.current >= srv.target then
+				Toast.show({
+					title = "Quest complete",
+					body  = quest.mob .. " " .. srv.current .. "/" .. srv.target .. " — re-accepting.",
+					kind  = "info", duration = 3,
+					key   = "q:done:" .. Q.key,
+				})
+				Q.accepted = false
+				Q.kills    = 0
+				-- Keep Q.current / Q.key so the next tick knows what we
+				-- were doing. acceptQuest will set them fresh on re-fire.
+				jwait(1.0)
+				continue
+			end
+
+			-- Completion path B: HUD hidden but we counted enough local
+			-- kills. BF auto-hides the HUD on turn-in; if we miss the
+			-- N/N frame, the local counter is the only signal we have.
+			if (not mine) and Q.current and Q.kills >= Q.current.taskCount then
+				Toast.show({
+					title = "Quest complete",
+					body  = Q.current.mob .. " x" .. Q.kills .. " — re-accepting.",
+					kind  = "info", duration = 3,
+					key   = "q:done-local:" .. tostring(Q.key),
+				})
+				Q.accepted = false
+				Q.kills    = 0
+				jwait(0.5)
+				continue
+			end
+
+			-- Accept when HUD doesn't show our quest. 5s backoff after a
+			-- failed accept to absorb the brief window between completion
+			-- and the HUD reappearing. Was 60s — way too long; we'd idle
+			-- for a full minute every cycle.
+			local needAccept = (srv == nil) or (not mine)
+			if needAccept and tick() >= _questFailAt + 5 then
 				local gotQuest = acceptQuest(quest)
 				if not gotQuest then
 					_questFailAt = tick()
