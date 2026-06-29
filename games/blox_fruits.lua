@@ -1051,12 +1051,153 @@ function Module.start(lib)
 		for key in pairs(t) do if not seen[key] then _espDetachEntry("players", key) end end
 	end
 
+	-- ─── CHEST ESP ───
+	-- workspace.ChestModels — Silver / Gold / Diamond drop on server timer.
+	-- Simpler card (no HP, no level). Tier-colored.
+	local function _chestColor(name)
+		if name:find("Diamond") then return Color3.fromRGB(120, 230, 255) end
+		if name:find("Gold")    then return Color3.fromRGB(255, 215,  80) end
+		return Color3.fromRGB(220, 220, 220) -- silver / default
+	end
+
+	local function _chestLabel(name)
+		-- "SilverChest" → "Silver Chest"
+		return (name:gsub("(%l)(%u)", "%1 %2"))
+	end
+
+	local function scanChestESP()
+		local t = _espGet("chests")
+		if not cfg.espChests then _espDetachAll("chests"); return end
+		local container = workspace:FindFirstChild("ChestModels")
+		if not container then return end
+		local seen = {}
+		for _, c in ipairs(container:GetChildren()) do
+			local part = c:IsA("BasePart") and c or c:FindFirstChildWhichIsA("BasePart")
+			if part then
+				local dist = _distFromMe(part) or 0
+				if cfg.espMaxDist > 0 and dist > cfg.espMaxDist then
+					_espDetachEntry("chests", c)
+				else
+					seen[c] = true
+					local entry = t[c]
+					if not entry then
+						local color = _chestColor(c.Name)
+						local cardH, cardP = ESP.card({
+							adornee = part, accent = color, group = "chests",
+							title = _chestLabel(c.Name),
+							caption = string.format("%d studs", dist),
+						})
+						t[c] = { cardHandle = cardH, card = cardP }
+					else
+						entry.card.setLines(nil, nil, string.format("%d studs", dist))
+					end
+				end
+			end
+		end
+		for key in pairs(t) do if not seen[key] then _espDetachEntry("chests", key) end end
+	end
+
+	-- ─── BOSS ESP ───
+	-- High-HP enemies + named bosses. Amber accent, HP bar.
+	local BOSS_NAMES = {
+		["Yeti"]=true, ["Mr. Officer"]=true, ["Tide Keeper"]=true,
+		["Magma Admiral"]=true, ["Cursed Captain"]=true, ["Greybeard"]=true,
+		["Diamond"]=true, ["Smoke Admiral"]=true, ["Awakened Ice Admiral"]=true,
+		["Mihawk"]=true, ["Don Swan"]=true, ["Cyborg"]=true, ["Stone"]=true,
+		["Royal Pirate Captain"]=true, ["King Red Head"]=true, ["Bobby"]=true,
+		["Saber Expert"]=true, ["Warden"]=true, ["Chief Warden"]=true,
+		["Swan"]=true, ["Vice Admiral"]=true, ["Fishman Lord"]=true,
+		["Wysper"]=true, ["Thunder God"]=true, ["Cyborg V2"]=true,
+		["Soul Reaper"]=true, ["Gorilla King"]=true, ["Chef"]=true,
+		["Ship Steerer"]=true, ["rip_indra True Form"]=true,
+	}
+
+	local function _isBoss(e, hum)
+		if BOSS_NAMES[e.Name] then return true end
+		if hum and hum.MaxHealth > 5000 then return true end
+		return false
+	end
+
+	local function scanBossESP()
+		local t = _espGet("bosses")
+		if not cfg.espBosses then _espDetachAll("bosses"); return end
+		local enemies = workspace:FindFirstChild("Enemies")
+		if not enemies then return end
+		local seen = {}
+		local AMBER = Color3.fromRGB(255, 170, 60)
+		for _, e in ipairs(enemies:GetChildren()) do
+			local hum = e:FindFirstChild("Humanoid")
+			local hrp = e:FindFirstChild("HumanoidRootPart")
+			if hrp and hum and hum.Health > 0 and _isBoss(e, hum) then
+				local dist = _distFromMe(hrp) or 0
+				if cfg.espMaxDist > 0 and dist > cfg.espMaxDist then
+					_espDetachEntry("bosses", e)
+				else
+					seen[e] = true
+					local lvl = e:GetAttribute("Level") or "?"
+					local sub = string.format("Lv %s • %d studs", tostring(lvl), dist)
+					local entry = t[e]
+					if not entry then
+						local cardH, cardP = ESP.card({
+							adornee = hrp, accent = AMBER, group = "bosses",
+							title = e.Name, subtitle = sub,
+							bar = { current = hum.Health, max = hum.MaxHealth },
+						})
+						local hlH = ESP.highlight({
+							adornee = e, color = AMBER,
+							fillTransparency = 0.75, outlineTransparency = 0.05,
+							group = "bosses",
+						})
+						t[e] = { cardHandle = cardH, hlHandle = hlH, card = cardP }
+					else
+						entry.card.setLines(nil, sub, nil)
+						entry.card.setBar(hum.Health, hum.MaxHealth)
+					end
+				end
+			end
+		end
+		for key in pairs(t) do if not seen[key] then _espDetachEntry("bosses", key) end end
+	end
+
+	-- ─── QUEST MOB ESP ───
+	-- Pure highlight, no card — would clutter combat. Bright green outline
+	-- on every alive instance of Q.current.mob.
+	local function scanQuestMobESP()
+		local t = _espGet("questmob")
+		if not cfg.espQuestMob or not Q.current then _espDetachAll("questmob"); return end
+		local mobName = Q.current.mob
+		local enemies = workspace:FindFirstChild("Enemies")
+		if not enemies then return end
+		local GREEN = Color3.fromRGB(120, 255, 140)
+		local seen = {}
+		for _, e in ipairs(enemies:GetChildren()) do
+			if e.Name == mobName then
+				local hum = e:FindFirstChild("Humanoid")
+				if hum and hum.Health > 0 then
+					seen[e] = true
+					if not t[e] then
+						local hlH = ESP.highlight({
+							adornee = e, color = GREEN,
+							fillTransparency = 0.8, outlineTransparency = 0.0,
+							group = "questmob",
+						})
+						t[e] = { hlHandle = hlH }
+					end
+				end
+			end
+		end
+		for key in pairs(t) do if not seen[key] then _espDetachEntry("questmob", key) end end
+	end
+
 	-- Single 1Hz scan thread. Fans out to every ESP scanner. Each scanner
 	-- short-circuits on its own cfg flag, so leaving them all off costs
-	-- ~5 function calls per second.
+	-- only a handful of function calls per second.
 	local function espScanLoop()
 		while _running do
 			safe(scanPlayerESP)
+			safe(scanChestESP)
+			safe(scanBossESP)
+			safe(scanQuestMobESP)
 			task.wait(1.0)
 		end
 	end
