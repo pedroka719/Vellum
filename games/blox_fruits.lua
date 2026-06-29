@@ -607,33 +607,46 @@ function Module.start(lib)
 	-- MarineQuest works on Marine Starter. Both give the same XP.
 	-- If a questId fires and the server ignores it (no-accept), we log it
 	-- and the user adjusts the row.
+	-- Atlas synced against ReplicatedStorage.Quests live data — captures
+	-- every tier including tier-3 boss rounds that the original atlas
+	-- missed (Swan, Gorilla King, Chef, Yeti, Vice Admiral, Magma Admiral,
+	-- Fishman Lord, Cyborg). LevelReq values from the game's quest module
+	-- are the MINIMUM accept level — lvlMax in each row is set to (next
+	-- tier's lvlMin - 1) so pickQuest's forward scan walks naturally.
 	local SEA1_QUESTS = {
 		{ lvlMin = 1,   lvlMax = 9,   island = "Pirate Starter",  questId = "BanditQuest1",  tier = 1, mob = "Bandit",          taskCount = 5 },
 		{ lvlMin = 1,   lvlMax = 9,   island = "Marine Starter",  questId = "MarineQuest",   tier = 1, mob = "Trainee",         taskCount = 5 },
-		{ lvlMin = 10,  lvlMax = 14,  island = "Middle Town",     questId = "MarineQuest",   tier = 1, mob = "Trainee",         taskCount = 5 },
-		{ lvlMin = 15,  lvlMax = 19,  island = "Jungle",          questId = "JungleQuest",   tier = 1, mob = "Monkey",          taskCount = 6 },
-		{ lvlMin = 20,  lvlMax = 29,  island = "Jungle",          questId = "JungleQuest",   tier = 2, mob = "Gorilla",         taskCount = 8 },
+		{ lvlMin = 10,  lvlMax = 14,  island = "Jungle",          questId = "JungleQuest",   tier = 1, mob = "Monkey",          taskCount = 6 },
+		{ lvlMin = 15,  lvlMax = 19,  island = "Jungle",          questId = "JungleQuest",   tier = 2, mob = "Gorilla",         taskCount = 8 },
+		{ lvlMin = 20,  lvlMax = 29,  island = "Jungle",          questId = "JungleQuest",   tier = 3, mob = "Gorilla King",    taskCount = 1, boss = true },
 		{ lvlMin = 30,  lvlMax = 39,  island = "Pirate Village",  questId = "BuggyQuest1",   tier = 1, mob = "Pirate",          taskCount = 8 },
-		{ lvlMin = 40,  lvlMax = 59,  island = "Pirate Village",  questId = "BuggyQuest1",   tier = 2, mob = "Brute",           taskCount = 8 },
+		{ lvlMin = 40,  lvlMax = 54,  island = "Pirate Village",  questId = "BuggyQuest1",   tier = 2, mob = "Brute",           taskCount = 8 },
+		{ lvlMin = 55,  lvlMax = 59,  island = "Pirate Village",  questId = "BuggyQuest1",   tier = 3, mob = "Chef",            taskCount = 1, boss = true },
 		{ lvlMin = 60,  lvlMax = 74,  island = "Desert",          questId = "DesertQuest",   tier = 1, mob = "Desert Bandit",   taskCount = 8 },
 		{ lvlMin = 75,  lvlMax = 89,  island = "Desert",          questId = "DesertQuest",   tier = 2, mob = "Desert Officer",  taskCount = 6 },
 		{ lvlMin = 90,  lvlMax = 99,  island = "Frozen Village",  questId = "SnowQuest",     tier = 1, mob = "Snow Bandit",     taskCount = 7 },
-		{ lvlMin = 100, lvlMax = 119, island = "Frozen Village",  questId = "SnowQuest",     tier = 2, mob = "Snowman",         taskCount = 8 },
-		{ lvlMin = 120, lvlMax = 149, island = "Marine Fortress", questId = "MarineQuest2",  tier = 1, mob = "Chief Petty Officer", taskCount = 8 },
+		{ lvlMin = 100, lvlMax = 104, island = "Frozen Village",  questId = "SnowQuest",     tier = 2, mob = "Snowman",         taskCount = 8 },
+		{ lvlMin = 105, lvlMax = 119, island = "Frozen Village",  questId = "SnowQuest",     tier = 3, mob = "Yeti",            taskCount = 1, boss = true },
+		{ lvlMin = 120, lvlMax = 129, island = "Marine Fortress", questId = "MarineQuest2",  tier = 1, mob = "Chief Petty Officer", taskCount = 8 },
+		{ lvlMin = 130, lvlMax = 149, island = "Marine Fortress", questId = "MarineQuest2",  tier = 2, mob = "Vice Admiral",    taskCount = 1, boss = true },
 		{ lvlMin = 150, lvlMax = 174, island = "Skylands",        questId = "SkyQuest",      tier = 1, mob = "Sky Bandit",      taskCount = 7 },
 		{ lvlMin = 175, lvlMax = 189, island = "Skylands",        questId = "SkyQuest",      tier = 2, mob = "Dark Master",     taskCount = 8 },
 		{ lvlMin = 190, lvlMax = 209, island = "Prison",          questId = "PrisonerQuest", tier = 1, mob = "Prisoner",          taskCount = 8 },
 		{ lvlMin = 210, lvlMax = 219, island = "Prison",          questId = "PrisonerQuest", tier = 2, mob = "Dangerous Prisoner", taskCount = 8 },
 		{ lvlMin = 220, lvlMax = 229, island = "Prison",          questId = "ImpelQuest",    tier = 1, mob = "Warden",            taskCount = 1, boss = true },
-		{ lvlMin = 230, lvlMax = 249, island = "Prison",          questId = "ImpelQuest",    tier = 2, mob = "Chief Warden",      taskCount = 1, boss = true },
+		{ lvlMin = 230, lvlMax = 239, island = "Prison",          questId = "ImpelQuest",    tier = 2, mob = "Chief Warden",      taskCount = 1, boss = true },
+		{ lvlMin = 240, lvlMax = 249, island = "Prison",          questId = "ImpelQuest",    tier = 3, mob = "Swan",              taskCount = 1, boss = true },
 		{ lvlMin = 250, lvlMax = 274, island = "Prison",          questId = "ColosseumQuest",tier = 1, mob = "Toga Warrior",    taskCount = 7 },
-		{ lvlMin = 275, lvlMax = 324, island = "Prison",          questId = "ColosseumQuest",tier = 2, mob = "Gladiator",       taskCount = 8 },
-		{ lvlMin = 325, lvlMax = 374, island = "Magma Village",   questId = "MagmaQuest",    tier = 1, mob = "Military Soldier",taskCount = 7 },
-		{ lvlMin = 375, lvlMax = 449, island = "Magma Village",   questId = "MagmaQuest",    tier = 2, mob = "Military Spy",    taskCount = 8 },
-		{ lvlMin = 450, lvlMax = 524, island = "Underwater City", questId = "FishmanQuest",  tier = 1, mob = "Fishman Warrior", taskCount = 8 },
-		{ lvlMin = 525, lvlMax = 624, island = "Underwater City", questId = "FishmanQuest",  tier = 2, mob = "Fishman Commando",taskCount = 7 },
-		{ lvlMin = 625, lvlMax = 749, island = "Fountain City",   questId = "FountainQuest", tier = 1, mob = "Galley Pirate",   taskCount = 8 },
-		{ lvlMin = 750, lvlMax = 999, island = "Fountain City",   questId = "FountainQuest", tier = 2, mob = "Galley Captain",  taskCount = 9 },
+		{ lvlMin = 275, lvlMax = 299, island = "Prison",          questId = "ColosseumQuest",tier = 2, mob = "Gladiator",       taskCount = 8 },
+		{ lvlMin = 300, lvlMax = 324, island = "Magma Village",   questId = "MagmaQuest",    tier = 1, mob = "Mil. Soldier",    taskCount = 7 },
+		{ lvlMin = 325, lvlMax = 349, island = "Magma Village",   questId = "MagmaQuest",    tier = 2, mob = "Mil. Spy",        taskCount = 8 },
+		{ lvlMin = 350, lvlMax = 374, island = "Magma Village",   questId = "MagmaQuest",    tier = 3, mob = "Magma Admiral",   taskCount = 1, boss = true },
+		{ lvlMin = 375, lvlMax = 399, island = "Underwater City", questId = "FishmanQuest",  tier = 1, mob = "Fishman Warrior", taskCount = 8 },
+		{ lvlMin = 400, lvlMax = 424, island = "Underwater City", questId = "FishmanQuest",  tier = 2, mob = "Fishman Commando",taskCount = 7 },
+		{ lvlMin = 425, lvlMax = 624, island = "Underwater City", questId = "FishmanQuest",  tier = 3, mob = "Fishman Lord",    taskCount = 1, boss = true },
+		{ lvlMin = 625, lvlMax = 649, island = "Fountain City",   questId = "FountainQuest", tier = 1, mob = "Galley Pirate",   taskCount = 8 },
+		{ lvlMin = 650, lvlMax = 674, island = "Fountain City",   questId = "FountainQuest", tier = 2, mob = "Galley Captain",  taskCount = 9 },
+		{ lvlMin = 675, lvlMax = 999, island = "Fountain City",   questId = "FountainQuest", tier = 3, mob = "Cyborg",          taskCount = 1, boss = true },
 	}
 
 	-- Picks the highest-level-fit quest for a given player level.
