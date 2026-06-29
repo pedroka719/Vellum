@@ -951,23 +951,88 @@ function Module.start(lib)
 				_islandGraceName = quest.island
 			end
 
-			-- Skylands sub-zone navigation: after portal drop, respawn, or grace
-			-- expiry, tween to the correct floating platform for the quest mob.
+			-- Accept quest if not yet accepted this cycle.
+			-- CRITICAL for Skylands: the NPC is at the tower (island.pos Y=874),
+			-- NOT on the sub-zone platform (Y=277 or 440). StartQuest fails when
+			-- the player isn't near the NPC (returns 0), so we MUST tween to the
+			-- NPC FIRST, accept the quest, THEN tween to the sub-zone platform.
+			-- BF's anti-cheat tolerates downward Y snaps (>75 tolerated) but
+			-- rolls back upward snaps — so going DOWN to a platform works with
+			-- a direct Y snap + tween, but going UP to the NPC requires the
+			-- full tween (retry at 80/s if the 150/s attempt is rolled back).
+			if not Q.accepted or Q.key ~= quest.questId .. "|" .. tostring(quest.tier) then
+				if quest.island == "Skylands" then
+					local ch = LocalPlayer.Character
+					local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+					if hrp then
+						local island = ISLAND_BY_NAME["Skylands"]
+						local npcDist = island and (hrp.Position - island.pos).Magnitude or 0
+						if npcDist > 60 then
+							-- Player is on a sub-zone platform, not at the NPC.
+							-- Tween up to the tower, accept the quest, then
+							-- tween back down to the quest platform.
+							if _hoverBP and _hoverBP.Parent then
+								_hoverBP.P, _hoverBP.D = 0, 0
+							end
+							_tweenHRPTo(hrp, island.pos + Vector3.new(0, 4, 0))
+							acceptQuest(quest)
+							local targetPos = SKY_SUB_ZONE[quest.mob]
+							if targetPos then
+								local yDiff = math.abs(targetPos.Y - hrp.Position.Y)
+								if yDiff > Y_SNAP_THRESHOLD then
+									hrp.CFrame = CFrame.new(hrp.Position.X, targetPos.Y, hrp.Position.Z)
+									task.wait(0.5)
+								end
+								_tweenHRPTo(hrp, targetPos)
+							end
+							if _hoverBP and _hoverBP.Parent then
+								_hoverBP.P, _hoverBP.D = 600, 80
+								_hoverBP.Position = hrp.Position
+							end
+							-- Skip the generic acceptQuest below (already handled above)
+							-- and skip the sub-zone nav already complete.
+						else
+							-- Already near the NPC — accept normally.
+							acceptQuest(quest)
+						end
+					else
+						acceptQuest(quest)
+					end
+				else
+					acceptQuest(quest)
+				end
+			end
+
+			-- Skylands sub-zone navigation: after quest acceptance (which may
+			-- have moved us to the NPC), tween to the correct floating platform.
+			-- When the quest was accepted above we already did this; this section
+			-- handles the steady-state case where the quest is already accepted
+			-- and the player just needs to get to the right platform (e.g. after
+			-- respawn or grace expiry).
 			-- CRITICAL: zero BP forces during the tween so BodyPosition doesn't
 			-- fight TweenService (P=600 fights every CFrame write at 60 fps).
-			if quest.island == "Skylands" then
+			if quest.island == "Skylands" and Q.accepted then
 				local targetPos = SKY_SUB_ZONE[quest.mob]
 				if targetPos then
 					local ch = LocalPlayer.Character
 					local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
 					if hrp and (hrp.Position - targetPos).Magnitude > 25 then
+						local island = ISLAND_BY_NAME["Skylands"]
+						local npcDist = island and (hrp.Position - island.pos).Magnitude or 0
+						-- If we're near the NPC (just accepted), do the Y snap
+						-- (going DOWN to the platform is tolerated by anti-cheat).
+						-- If we're already on the platform (steady-state respawn),
+						-- the distance check above keeps us here.
+						-- If we're somewhere else (anti-cheat rollback), tween.
 						if _hoverBP and _hoverBP.Parent then
 							_hoverBP.P, _hoverBP.D = 0, 0
 						end
-						local yDiff = math.abs(targetPos.Y - hrp.Position.Y)
-						if yDiff > Y_SNAP_THRESHOLD then
-							hrp.CFrame = CFrame.new(hrp.Position.X, targetPos.Y, hrp.Position.Z)
-							task.wait(0.5)
+						if targetPos.Y < hrp.Position.Y then
+							local yDiff = hrp.Position.Y - targetPos.Y
+							if yDiff > Y_SNAP_THRESHOLD then
+								hrp.CFrame = CFrame.new(hrp.Position.X, targetPos.Y, hrp.Position.Z)
+								task.wait(0.5)
+							end
 						end
 						_tweenHRPTo(hrp, targetPos)
 						if _hoverBP and _hoverBP.Parent then
@@ -976,11 +1041,6 @@ function Module.start(lib)
 						end
 					end
 				end
-			end
-
-			-- Accept quest if not yet accepted this cycle
-			if not Q.accepted or Q.key ~= quest.questId .. "|" .. tostring(quest.tier) then
-				acceptQuest(quest)
 			end
 
 			applyQuestFilters(quest)
