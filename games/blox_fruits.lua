@@ -130,6 +130,7 @@ function Module.start(lib)
 	-- Teleport-in-progress guard. Pauses autoFarm + flight while a TP runs
 	-- so the hover loop doesn't fight the tween for HRP control.
 	local _tpInProgress = false
+	local _questFailAt = 0  -- tick() when quest acceptance last failed; retry after 60s
 
 	-- Master alive flag. Set to false when the GUI is closed so all spawned
 	-- loops (autoFarm, autoFarmLevel, autoStats, progress) exit cleanly instead
@@ -679,38 +680,74 @@ function Module.start(lib)
 	-- Some quests (e.g. Skylands) reject the tier parameter and require a
 	-- bare quest ID call. If InvokeServer returns 0 (failure) with tier,
 	-- retry without it. This covers both the old and new remote signatures.
+	--
+	-- IMPORTANT: BF's StartQuest may return 1 ("success") without actually
+	-- creating a quest (e.g. Skylands). After a successful StartQuest call,
+	-- we verify by checking GetQuestInfo. If no quest is active, the caller
+	-- is informed via the return value and should still apply farm filters
+	-- (so autoFarmLoop can try to find the mob) but NOT mark Q.accepted=true
+	-- (which would skip future acceptance attempts).
+	-- Returns: true if quest was actually accepted, false otherwise.
 	local function acceptQuest(q)
-		if not q then return end
+		if not q then return false end
 		local key = q.questId .. "|" .. tostring(q.tier)
-		if Q.key == key and Q.accepted then return end  -- already accepted
+		if Q.key == key and Q.accepted then return true end  -- already accepted
+
+		local function verifyActive()
+			local ok, info = pcall(function()
+				return R.CommF_:InvokeServer("GetQuestInfo")
+			end)
+			return ok and info ~= nil
+		end
 
 		local ok, res = pcall(function()
 			return R.CommF_:InvokeServer("StartQuest", q.questId, q.tier)
 		end)
+		local anySuccess
 		if ok and (res == 0 or res == nil) then
 			-- Tier rejected — retry without tier parameter (new signature).
 			-- Some game versions or quests require bare questId only.
 			local ok2, res2 = pcall(function()
 				return R.CommF_:InvokeServer("StartQuest", q.questId)
 			end)
-			if not ok2 or res2 == 0 or res2 == nil then
+			if ok2 and res2 ~= 0 and res2 ~= nil then
+				anySuccess = true
+			else
 				warn("[Vellum BF] StartQuest failed for " .. q.questId .. " tier=" .. tostring(q.tier))
-				return
 			end
-		elseif not ok then
+		elseif ok then
+			anySuccess = true
+		else
 			warn("[Vellum BF] StartQuest error for " .. q.questId .. ": " .. tostring(res))
-			return
 		end
-		Q.current  = q
-		Q.kills    = 0
-		Q.accepted = true
-		Q.key      = key
-		Toast.show({
-			title = "Quest accepted",
-			body  = q.mob .. " x" .. q.taskCount .. " (Lv " .. q.lvlMin .. "-" .. q.lvlMax .. ")",
-			kind  = "info", duration = 4,
-			key   = "q:" .. key,
-		})
+
+		-- Verify the quest is actually active. Some games (Skylands) return
+		-- success from StartQuest but don't create a quest object.
+		local actuallyActive = anySuccess and verifyActive()
+		if anySuccess and not actuallyActive then
+			warn("[Vellum BF] " .. q.questId .. " StartQuest returned success but no quest " ..
+			      "active (GetQuestInfo=nil) — farming without quest rewards.")
+		end
+
+		-- Always configure farm filters so autoFarmLoop knows what to look for.
+		Q.current = q
+		Q.kills   = 0
+		if actuallyActive then
+			Q.accepted = true
+			Q.key      = key
+			Toast.show({
+				title = "Quest accepted",
+				body  = q.mob .. " x" .. q.taskCount .. " (Lv " .. q.lvlMin .. "-" .. q.lvlMax .. ")",
+				kind  = "info", duration = 4,
+				key   = "q:" .. key,
+			})
+			return true
+		else
+			Q.accepted = false
+			Q.key      = nil
+			_questFailAt = tick()
+			return false
+		end
 	end
 
 	-- Drive farm filters to match the quest target.
@@ -979,46 +1016,60 @@ function Module.start(lib)
 			-- rolls back upward snaps — so going DOWN to a platform works with
 			-- a direct Y snap + tween, but going UP to the NPC requires the
 			-- full tween (retry at 80/s if the 150/s attempt is rolled back).
+			--
+			-- If quest acceptance recently failed (e.g. Skylands StartQuest
+			-- returns 1 without activating the quest), skip the NPC tween and
+			-- acceptQuest call for 60s to avoid spamming. Farm filters are
+			-- still applied every cycle so autoFarmLoop can try to find mobs.
 			if not Q.accepted or Q.key ~= quest.questId .. "|" .. tostring(quest.tier) then
-				if quest.island == "Skylands" then
-					local ch = LocalPlayer.Character
-					local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
-					if hrp then
-						local island = ISLAND_BY_NAME["Skylands"]
-						local npcDist = island and (hrp.Position - island.pos).Magnitude or 0
-						if npcDist > 60 then
-							-- Player is on a sub-zone platform, not at the NPC.
-							-- Tween up to the tower, accept the quest, then
-							-- tween back down to the quest platform.
-							if _hoverBP and _hoverBP.Parent then
-								_hoverBP.P, _hoverBP.D = 0, 0
-							end
-							_tweenHRPTo(hrp, island.pos + Vector3.new(0, 4, 0))
-							acceptQuest(quest)
-							local targetPos = SKY_SUB_ZONE[quest.mob]
-							if targetPos then
-								local yDiff = math.abs(targetPos.Y - hrp.Position.Y)
-								if yDiff > Y_SNAP_THRESHOLD then
-									hrp.CFrame = CFrame.new(hrp.Position.X, targetPos.Y, hrp.Position.Z)
-									task.wait(0.5)
+				if tick() >= _questFailAt + 60 then
+					local gotQuest
+					if quest.island == "Skylands" then
+						local ch = LocalPlayer.Character
+						local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+						if hrp then
+							local island = ISLAND_BY_NAME["Skylands"]
+							local npcDist = island and (hrp.Position - island.pos).Magnitude or 0
+							if npcDist > 60 then
+								-- Player is on a sub-zone platform, not at the NPC.
+								-- Tween up to the tower, accept the quest, then
+								-- tween back down to the quest platform.
+								if _hoverBP and _hoverBP.Parent then
+									_hoverBP.P, _hoverBP.D = 0, 0
 								end
-								_tweenHRPTo(hrp, targetPos)
+								_tweenHRPTo(hrp, island.pos + Vector3.new(0, 4, 0))
+								gotQuest = acceptQuest(quest)
+								local targetPos = SKY_SUB_ZONE[quest.mob]
+								if targetPos then
+									local yDiff = math.abs(targetPos.Y - hrp.Position.Y)
+									if yDiff > Y_SNAP_THRESHOLD then
+										hrp.CFrame = CFrame.new(hrp.Position.X, targetPos.Y, hrp.Position.Z)
+										task.wait(0.5)
+									end
+									_tweenHRPTo(hrp, targetPos)
+								end
+								if _hoverBP and _hoverBP.Parent then
+									_hoverBP.P, _hoverBP.D = 600, 80
+									_hoverBP.Position = hrp.Position
+								end
+								-- Skip the generic acceptQuest below (already handled above)
+								-- and skip the sub-zone nav already complete.
+							else
+								-- Already near the NPC — accept normally.
+								gotQuest = acceptQuest(quest)
 							end
-							if _hoverBP and _hoverBP.Parent then
-								_hoverBP.P, _hoverBP.D = 600, 80
-								_hoverBP.Position = hrp.Position
-							end
-							-- Skip the generic acceptQuest below (already handled above)
-							-- and skip the sub-zone nav already complete.
 						else
-							-- Already near the NPC — accept normally.
-							acceptQuest(quest)
+							gotQuest = acceptQuest(quest)
 						end
 					else
-						acceptQuest(quest)
+						gotQuest = acceptQuest(quest)
 					end
-				else
-					acceptQuest(quest)
+					-- If quest acceptance failed, set fail timer so we don't
+					-- spam the remote every 3 seconds. Farm filters (applied
+					-- below) let autoFarmLoop try to find mobs in the meantime.
+					if not gotQuest then
+						_questFailAt = tick()
+					end
 				end
 			end
 
@@ -1421,23 +1472,33 @@ function Module.start(lib)
 								end
 							else
 								-- No mobs of this type exist anywhere on the map.
-								-- Tween toward island center to trigger spawns, but
-								-- only if we're NOT already at the island. This guard
-								-- prevents undoing Skylands sub-zone placement: after
-								-- the sub-zone nav put us on the correct platform,
-								-- atIsland returns true, so we don't tween back to the
-								-- tower (island.pos = Y 874). For other islands the
-								-- check also avoids pointless tweens when the issue
-								-- is a server respawn timer, not wrong position.
-								if not atIsland(Q.current.island) then
-									local island = ISLAND_BY_NAME[Q.current.island]
-									if island then
-										dbg("fallback-tp", Q.current.island)
-										local dest = island.pos + Vector3.new(0, 10, 0)
-										_tweenHRPTo(hrp2, dest)
-										if _hoverBP and _hoverBP.Parent then
-											_hoverBP.P, _hoverBP.D = 600, 80
-											_hoverBP.Position = dest
+								-- If the quest isn't actually active (e.g. Skylands
+								-- StartQuest returned success-but-no-quest), widen
+								-- the target filter to accept ANY enemy so the script
+								-- farms what's available (generic spawns, other mobs)
+								-- rather than idling with nothing to kill.
+								if not Q.accepted then
+									dbg("fallback-widen", mobName .. " not found, quest not active — clearing filter")
+									cfg.farmTargetName = ""
+									cfg.farmLevelMin   = 1
+									cfg.farmLevelMax   = 9999
+								else
+									-- Quest IS active — tween toward island center
+									-- to trigger spawns, but only if we're NOT already
+									-- at the island. This guard prevents undoing
+									-- Skylands sub-zone placement: after the sub-zone
+									-- nav put us on the correct platform, atIsland
+									-- returns true, so we don't tween back to the tower.
+									if not atIsland(Q.current.island) then
+										local island = ISLAND_BY_NAME[Q.current.island]
+										if island then
+											dbg("fallback-tp", Q.current.island)
+											local dest = island.pos + Vector3.new(0, 10, 0)
+											_tweenHRPTo(hrp2, dest)
+											if _hoverBP and _hoverBP.Parent then
+												_hoverBP.P, _hoverBP.D = 600, 80
+												_hoverBP.Position = dest
+											end
 										end
 									end
 								end
