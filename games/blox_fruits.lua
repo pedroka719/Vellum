@@ -676,12 +676,31 @@ function Module.start(lib)
 	}
 
 	-- Accept a quest via CommF_:StartQuest and reset the kill counter.
+	-- Some quests (e.g. Skylands) reject the tier parameter and require a
+	-- bare quest ID call. If InvokeServer returns 0 (failure) with tier,
+	-- retry without it. This covers both the old and new remote signatures.
 	local function acceptQuest(q)
 		if not q then return end
 		local key = q.questId .. "|" .. tostring(q.tier)
 		if Q.key == key and Q.accepted then return end  -- already accepted
 
-		safe(function() R.CommF_:InvokeServer("StartQuest", q.questId, q.tier) end)
+		local ok, res = pcall(function()
+			return R.CommF_:InvokeServer("StartQuest", q.questId, q.tier)
+		end)
+		if ok and (res == 0 or res == nil) then
+			-- Tier rejected — retry without tier parameter (new signature).
+			-- Some game versions or quests require bare questId only.
+			local ok2, res2 = pcall(function()
+				return R.CommF_:InvokeServer("StartQuest", q.questId)
+			end)
+			if not ok2 or res2 == 0 or res2 == nil then
+				warn("[Vellum BF] StartQuest failed for " .. q.questId .. " tier=" .. tostring(q.tier))
+				return
+			end
+		elseif not ok then
+			warn("[Vellum BF] StartQuest error for " .. q.questId .. ": " .. tostring(res))
+			return
+		end
 		Q.current  = q
 		Q.kills    = 0
 		Q.accepted = true
