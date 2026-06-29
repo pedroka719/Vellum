@@ -1530,57 +1530,26 @@ function Module.start(lib)
 		LuxuryBoatDealer      = Vector3.new(-2534, 3, 1841),    -- Marine Starter
 	}
 
-	-- TP-buy-TP routine. Reuses fruit sniper's safety pattern:
-	-- pause autoFarm, teardown flight, segmented tween to NPC, fire BuyItem,
-	-- segmented tween back, restart flight. Saves & restores user position
-	-- so the script doesn't lose the farm spot.
-	--   npcKey   — index into NPC_LOCATIONS
-	--   item     — exact item string the server expects (e.g. "Triple Katana")
+	-- Pure remote purchase — no TP needed. Verified live: BuyItem works
+	-- from anywhere in the world, the server doesn't check NPC proximity.
+	-- Earlier probe bought Triple Katana from Magma while the Master
+	-- Sword Dealer was at Skylands; the item still landed in the
+	-- backpack. The NPC_LOCATIONS table stays around because some
+	-- future shop calls (boats, certain fruit purchases) might require
+	-- proximity — we'll re-add the TP wrapper if/when that turns out
+	-- to be the case.
+	--   npcKey   — kept in the signature for future-proofing / logging
+	--   item     — exact item string the server expects ("Triple Katana")
 	--   displayName — for the toast (defaults to item)
 	-- Returns true on success (server returned 0 or 1).
 	local function shopBuy(npcKey, item, displayName)
-		local pos = NPC_LOCATIONS[npcKey]
-		if not pos then
-			Toast.show({ title = "Shop error", body = "Unknown NPC: " .. tostring(npcKey),
-				kind = "warn", duration = 4 })
-			return false
-		end
-		local ch = LocalPlayer.Character
-		local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
-		if not hrp then return false end
-		local returnPos = hrp.Position
-
 		Toast.show({
-			title = "Buying", body = (displayName or item) .. "  →  " .. npcKey,
-			kind = "info", duration = 3, key = "shop:" .. item,
+			title = "Buying", body = (displayName or item),
+			kind = "info", duration = 2, key = "shop:" .. item,
 		})
-
-		_tpInProgress = true
-		local restoreAutoFarm = cfg.autoFarm
-		local restoreAutoFL   = cfg.autoFarmLevel
-		cfg.autoFarm = false
-		cfg.autoFarmLevel = false
-		safe(_stopFlightFn)
-
-		-- Go to NPC
-		safe(function() _tweenHRPTo(hrp, pos + Vector3.new(0, 4, 0)) end)
-		task.wait(0.5)
-
-		-- Fire purchase
 		local ok, res = pcall(function()
 			return R.CommF_:InvokeServer("BuyItem", item)
 		end)
-		task.wait(0.3)
-
-		-- Go home
-		safe(function() _tweenHRPTo(hrp, returnPos) end)
-		task.wait(0.4)
-
-		_tpInProgress = false
-		cfg.autoFarm = restoreAutoFarm
-		cfg.autoFarmLevel = restoreAutoFL
-		safe(startFlight)
-
 		local resStr = tostring(res)
 		local success = ok and (resStr == "0" or resStr == "1")
 		Toast.show({
