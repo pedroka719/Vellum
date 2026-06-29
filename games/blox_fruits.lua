@@ -945,6 +945,122 @@ function Module.start(lib)
 		end
 	end
 
+	-- ═══════════════════════════ DYNAMIC ESP ═══════════════════════════
+	-- Per-group tracker registries. Each scanner maintains its own table
+	-- of { [instanceKey] = entry } where entry holds handles + cached
+	-- payload functions so we can update the card in place instead of
+	-- rebuilding it every tick (cheap text/bar refreshes, expensive
+	-- BillboardGui instantiation).
+	local _espTrackers = {}
+
+	local function _espGet(group)
+		_espTrackers[group] = _espTrackers[group] or {}
+		return _espTrackers[group]
+	end
+
+	local function _espDetachEntry(group, key)
+		local t = _espGet(group)
+		local entry = t[key]
+		if not entry then return end
+		if entry.cardHandle then ESP.detach(entry.cardHandle) end
+		if entry.hlHandle   then ESP.detach(entry.hlHandle)   end
+		t[key] = nil
+	end
+
+	local function _espDetachAll(group)
+		local t = _espGet(group)
+		for key in pairs(t) do _espDetachEntry(group, key) end
+	end
+
+	-- Squared distance from LocalPlayer HRP. nil if no character.
+	local function _distFromMe(part)
+		local ch = LocalPlayer.Character
+		local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+		if not hrp or not part then return nil end
+		return (part.Position - hrp.Position).Magnitude
+	end
+
+	-- ─── PLAYER ESP ───
+	-- Card per other player. Reads Data.Race + Data.DevilFruit + Level
+	-- from the player's public Data folder (verified — the server
+	-- mirrors these to every client). Team color: same-team green,
+	-- hostile red. Skips LocalPlayer.
+	local function _playerColor(plr)
+		if plr.Team and LocalPlayer.Team and plr.Team == LocalPlayer.Team then
+			return Color3.fromRGB(120, 220, 120)
+		end
+		return Color3.fromRGB(255, 90, 90)
+	end
+
+	local function _playerLine(plr, dist)
+		local data = plr:FindFirstChild("Data")
+		local lvl  = data and data:FindFirstChild("Level") and data.Level.Value or "?"
+		local race = data and data:FindFirstChild("Race") and tostring(data.Race.Value) or ""
+		local fruit = data and data:FindFirstChild("DevilFruit") and tostring(data.DevilFruit.Value) or ""
+		local title = string.format("%s   Lv %s", plr.DisplayName or plr.Name, tostring(lvl))
+		local sub
+		if race ~= "" and fruit ~= "" then sub = race .. " • " .. fruit
+		elseif fruit ~= "" then sub = fruit
+		elseif race ~= "" then sub = race
+		else sub = "—" end
+		local caption = string.format("%d studs", dist or 0)
+		return title, sub, caption
+	end
+
+	local function scanPlayerESP()
+		local t = _espGet("players")
+		if not cfg.espPlayers then _espDetachAll("players"); return end
+		local Players = game:GetService("Players")
+		local seen = {}
+		for _, plr in ipairs(Players:GetPlayers()) do
+			if plr ~= LocalPlayer then
+				local ch = plr.Character
+				local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+				local hum = ch and ch:FindFirstChild("Humanoid")
+				if hrp and hum and hum.Health > 0 then
+					local dist = _distFromMe(hrp) or 0
+					if cfg.espMaxDist > 0 and dist > cfg.espMaxDist then
+						_espDetachEntry("players", plr)
+					else
+						seen[plr] = true
+						local color = _playerColor(plr)
+						local title, sub, caption = _playerLine(plr, dist)
+						local entry = t[plr]
+						if not entry or entry.char ~= ch then
+							-- New player OR character rebuilt → tear down + rebuild
+							if entry then _espDetachEntry("players", plr) end
+							local cardH, cardP = ESP.card({
+								adornee = hrp, accent = color, group = "players",
+								title = title, subtitle = sub, caption = caption,
+								bar = { current = hum.Health, max = hum.MaxHealth },
+							})
+							local hlH = ESP.highlight({
+								adornee = ch, color = color,
+								fillTransparency = 0.85, outlineTransparency = 0.05,
+								group = "players",
+							})
+							t[plr] = { cardHandle = cardH, hlHandle = hlH, card = cardP, char = ch }
+						else
+							entry.card.setLines(title, sub, caption)
+							entry.card.setBar(hum.Health, hum.MaxHealth)
+						end
+					end
+				end
+			end
+		end
+		for key in pairs(t) do if not seen[key] then _espDetachEntry("players", key) end end
+	end
+
+	-- Single 1Hz scan thread. Fans out to every ESP scanner. Each scanner
+	-- short-circuits on its own cfg flag, so leaving them all off costs
+	-- ~5 function calls per second.
+	local function espScanLoop()
+		while _running do
+			safe(scanPlayerESP)
+			task.wait(1.0)
+		end
+	end
+
 	-- ═══════════════════════════ LOOPS ═══════════════════════════
 
 	-- One always-on flight connection while auto-farm is enabled. Picks
@@ -2123,6 +2239,7 @@ function Module.start(lib)
 	task.spawn(autoStatsLoop)
 	task.spawn(trackProgressLoop)
 	task.spawn(bodyNoclipLoop)
+	task.spawn(espScanLoop)
 	antiAfkLoop()
 
 	Toast.show({
