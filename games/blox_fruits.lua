@@ -419,17 +419,30 @@ function Module.start(lib)
 		Sky3Exit       = Vector3.new(-4607, 874, -1667),  -- sky portal (Skylands variant)
 	}
 
-	-- Skylands has multiple floating platforms at different Y levels. After
-	-- the portal drops you at SkyArea1 (Y~874), tween to the right platform
-	-- for the current quest mob. Keyed by SEA1_QUESTS mob name.
-	-- Skylands sub-platform spawn centroids — measured live from
-	-- workspace.Enemies, not estimated from the map. AGENTS.md had Dark Master
-	-- at (-4948, 440, -2984) which is empty air ~700 studs SE of the actual
-	-- spawn cluster. These are the real centroids of 4 DM and 3 SB spawns.
-	local SKY_SUB_ZONE = {
-		["Sky Bandit"]  = Vector3.new(-4963, 277, -2876),
-		["Dark Master"] = Vector3.new(-5247, 387, -2263),
-	}
+	-- Generic sub-zone discovery: instead of hardcoded per-island platform
+	-- coords, scan workspace.Enemies for the quest mob and return the centroid
+	-- of all alive matches. Works on ANY island with platforms (Skylands,
+	-- Prison floors, etc) without per-quest config. Returns nil if no live
+	-- matches — caller falls back to island.pos to trigger spawns.
+	local function discoverSubZone(mobName)
+		local enemies = workspace:FindFirstChild("Enemies")
+		if not enemies then return nil end
+		local sx, sy, sz, n = 0, 0, 0, 0
+		for _, e in ipairs(enemies:GetChildren()) do
+			if e.Name == mobName then
+				local eh = e:FindFirstChild("HumanoidRootPart")
+				local h  = e:FindFirstChild("Humanoid")
+				if eh and h and h.Health > 0 then
+					sx = sx + eh.Position.X
+					sy = sy + eh.Position.Y
+					sz = sz + eh.Position.Z
+					n  = n + 1
+				end
+			end
+		end
+		if n == 0 then return nil end
+		return Vector3.new(sx / n, sy / n, sz / n)
+	end
 
 	-- Island TP — pisun-hub pattern, the one that actually works.
 	--
@@ -571,25 +584,9 @@ function Module.start(lib)
 			hrp.CFrame = hrp.CFrame + Vector3.new(0, 50, 0)
 			task.wait(1.5)  -- server completes portal warp
 
-			-- Skylands sub-zone navigation: the portal drops you at SkyArea1
-			-- (Y~874), but the mobs for your level range live on different
-			-- floating platforms. Use Data.Level to pick the right platform
-			-- and direct-CFrame-snap there. Coords pulled from SKY_SUB_ZONE
-			-- (live-measured spawn centroids, not estimates).
-			if name == "Skylands" then
-				local data = LocalPlayer:FindFirstChild("Data")
-				local lvl = data and data:FindFirstChild("Level") and data.Level.Value or 0
-				local targetPos
-				if lvl >= 150 and lvl <= 174 then
-					targetPos = SKY_SUB_ZONE["Sky Bandit"]
-				elseif lvl >= 175 and lvl <= 189 then
-					targetPos = SKY_SUB_ZONE["Dark Master"]
-				end
-				if targetPos then
-					hrp.CFrame = CFrame.new(targetPos + Vector3.new(0, 4, 0))
-					task.wait(0.4)
-				end
-			end
+			-- Post-portal sub-zone discovery is handled by autoFarmLevelLoop
+			-- (which knows the active quest mob). tpToIsland only places us at
+			-- the portal exit; the next farm tick scans live spawns and snaps.
 		else
 			local landingPos = island.pos + Vector3.new(0, 4, 0)
 			_tweenHRPTo(hrp, landingPos)
@@ -737,8 +734,32 @@ function Module.start(lib)
 		cfg.farmLevelMax   = q.lvlMax + 5
 	end
 
-	-- Callback invoked from autoFarmLoop on each death. If the kill matches
-	-- the quest mob, increment the counter.
+	-- Read the server's authoritative quest state from the Quest HUD.
+	-- Format on screen: "Defeat 8 Prisoners (2/8)" — we parse (N/M) from the
+	-- title text. This is what the server pushes to the client via QuestUpdate
+	-- (the same data BF's own quest tracker renders). Returns:
+	--   {current=N, target=M, raw="text"} when a quest is active and parseable
+	--   nil when no quest is shown OR the title can't be parsed
+	-- We DON'T extract the mob name — the local Q.current.mob is more reliable
+	-- because the HUD uses pluralized display names ("Prisoners" not "Prisoner").
+	local function readServerQuest()
+		local pgui = LocalPlayer:FindFirstChild("PlayerGui")
+		local main = pgui and pgui:FindFirstChild("Main")
+		local quest = main and main:FindFirstChild("Quest")
+		local cont  = quest and quest:FindFirstChild("Container")
+		local qt    = cont and cont:FindFirstChild("QuestTitle")
+		local title = qt and qt:FindFirstChild("Title")
+		if not title or not title:IsA("TextLabel") then return nil end
+		local text = title.Text
+		if not text or text == "" then return nil end
+		local cur, tgt = text:match("%((%d+)%s*/%s*(%d+)%)")
+		if not cur then return nil end
+		return { current = tonumber(cur), target = tonumber(tgt), raw = text }
+	end
+
+	-- Kill-counter update. We keep Q.kills as a local mirror but the SERVER is
+	-- the source of truth (read via readServerQuest). The local counter is only
+	-- used as a fast fallback if the HUD probe fails.
 	local function recordQuestKill(enemyName)
 		if not Q.current then return end
 		if enemyName == Q.current.mob then
@@ -746,9 +767,14 @@ function Module.start(lib)
 		end
 	end
 
-	-- Returns true if the quest kill target has been met.
+	-- Quest complete iff the server HUD says current >= target. Falls back to
+	-- the local counter if HUD parse fails (defensive — prevents infinite loop
+	-- if PlayerGui structure changes after a game update).
 	local function questIsComplete()
-		return Q.current and Q.kills >= Q.current.taskCount
+		if not Q.current then return false end
+		local srv = readServerQuest()
+		if srv then return srv.current >= srv.target end
+		return Q.kills >= Q.current.taskCount
 	end
 
 	-- ═══════════════════════════ ISLAND ESP ═══════════════════════════
@@ -917,19 +943,27 @@ function Module.start(lib)
 			local levelVal = data and data:FindFirstChild("Level")
 			if not levelVal then jwait(3.0); continue end
 			local level = levelVal.Value
+			Q.lastLevel = level
 
-			if level ~= Q.lastLevel then
-				Q.lastLevel = level
+			local quest = pickQuest(level)
+
+			-- Reset Q only when the QUEST itself changes (different questId+tier),
+			-- not on every level change. Killing the quest mob gives XP and often
+			-- triggers a level-up mid-quest; the previous code wiped Q.accepted on
+			-- every level change, causing the next loop tick to fire StartQuest
+			-- again, which the server interprets as "accept this quest from
+			-- scratch" — RESETTING the kill counter server-side. That's why we
+			-- never finished quests: we kept overwriting our own progress.
+			local newKey = quest and (quest.questId .. "|" .. tostring(quest.tier)) or nil
+			if Q.key and Q.key ~= newKey then
 				Q.accepted = false
-				Q.kills = 0
-				Q.current = nil
-				Q.key = nil
+				Q.kills    = 0
+				Q.current  = nil
+				Q.key      = nil
 				_islandGraceUntil = 0
 				currentTarget = nil
 				targetOriginalY = nil
 			end
-
-			local quest = pickQuest(level)
 			if not quest then
 				-- Level past the quest atlas. Auto-farm still runs (simple kill mode).
 				if Q.current then
@@ -977,7 +1011,11 @@ function Module.start(lib)
 				_islandGraceUntil = tick() + 60
 				_islandGraceName = quest.island
 				task.wait(0.8)
-				Q.accepted = false
+				-- NOTE: do NOT clear Q.accepted here. Travelling to the quest
+				-- island doesn't invalidate the server-side quest acceptance.
+				-- Clearing it caused us to fire StartQuest a second time, which
+				-- the server treats as a fresh acceptance and resets the kill
+				-- counter to 0/N — wiping progress from the previous run.
 				continue
 			end
 
@@ -987,60 +1025,63 @@ function Module.start(lib)
 				_islandGraceName = quest.island
 			end
 
-			-- Accept quest if not yet accepted this cycle.
-			-- StartQuest is a RemoteFunction — proximity to the NPC doesn't matter.
-			-- The Skylands-exclusive NPC tween was removed because:
-			--   1. Anti-cheat blocks upward movement to the tower (Y 874)
-			--   2. Even standing AT the NPC, StartQuest returns false success
-			--      (returns 1 but GetQuestInfo returns nil)
-			--   3. The tween oscillated the character between tower and platform
-			-- The sub-zone nav below handles Skylands platform positioning instead.
-			--
-			-- If quest acceptance recently failed, skip the call for 60s to avoid
-			-- spamming. Farm filters are still applied every cycle so autoFarmLoop
-			-- can try to find mobs without quest rewards.
-			if not Q.accepted or Q.key ~= quest.questId .. "|" .. tostring(quest.tier) then
-				if tick() >= _questFailAt + 60 then
-					local gotQuest = acceptQuest(quest)
-					if not gotQuest then
-						_questFailAt = tick()
-					end
+			-- Sync local Q.kills with the server HUD before deciding to accept.
+			-- If the HUD shows the correct quest already active with progress,
+			-- we MUST NOT fire StartQuest again — that resets the server-side
+			-- counter. The HUD is the only place the server exposes quest
+			-- state to the client (GetQuestInfo returns nil, no Player attr).
+			local srv = readServerQuest()
+			if srv and Q.current then
+				Q.kills = srv.current
+				-- HUD shows the right quest with non-zero progress → trust it.
+				if srv.target == quest.taskCount and srv.current > 0 then
+					Q.accepted = true
+					Q.key = quest.questId .. "|" .. tostring(quest.tier)
 				end
 			end
 
-			-- Skylands sub-zone navigation: move to the correct floating platform
-			-- for the current quest target. Direct CFrame snap — the previous
-			-- BodyPosition rewrite was solving a phantom problem. Live probe
-			-- confirmed BF anti-cheat tolerates downward + diagonal CFrame snaps
-			-- here (339-stud diagonal from main landmass to Dark Master platform
-			-- accepted, no rollback). Always runs (not gated on Q.accepted) so
-			-- the character returns to the right platform if combat drift pulls
-			-- them off. <25 stud distance gate prevents redundant snaps.
-			if quest.island == "Skylands" then
-				local targetPos = SKY_SUB_ZONE[quest.mob]
-				if targetPos then
-					local ch = LocalPlayer.Character
-					local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
-					if hrp then
-						-- Gate by "are we on the right sub-platform" not "are we
-						-- at the exact centroid". Combat drift carries us 80+
-						-- studs toward the nearest mob — a strict gate triggers
-						-- re-snap each tick and oscillates. Tolerate 250-stud
-						-- XZ roaming, snap back only on big Y altitude change
-						-- (means we're on the wrong platform).
-						local dx = hrp.Position.X - targetPos.X
-						local dz = hrp.Position.Z - targetPos.Z
-						local xzDist = math.sqrt(dx*dx + dz*dz)
-						local yDiff = math.abs(hrp.Position.Y - targetPos.Y)
-						if xzDist > 250 or yDiff > 60 then
-							hoverEnabled = false
-							hrp.CFrame = CFrame.new(targetPos + Vector3.new(0, 4, 0))
-							task.wait(0.4)
-							if _hoverBP and _hoverBP.Parent then
-								_hoverBP.Position = hrp.Position
-							end
-							hoverEnabled = true
+			-- Accept only if the HUD says no quest is active OR the quest text
+			-- doesn't match our target's task count. StartQuest is a
+			-- RemoteFunction — proximity to the NPC doesn't matter. A 60s
+			-- backoff after a failed accept prevents spamming.
+			local needAccept = not Q.accepted
+				or Q.key ~= quest.questId .. "|" .. tostring(quest.tier)
+				or (srv == nil)                              -- no quest on HUD
+				or (srv and srv.target ~= quest.taskCount)   -- wrong quest on HUD
+			if needAccept and tick() >= _questFailAt + 60 then
+				local gotQuest = acceptQuest(quest)
+				if not gotQuest then
+					_questFailAt = tick()
+				end
+			end
+
+			-- Generic sub-zone snap: works on ANY island. If quest mobs are
+			-- alive in workspace.Enemies, take their spawn centroid and snap
+			-- there when we're far away (300+ studs). If no mobs alive yet
+			-- (quest just accepted, server hasn't spawned them), we stay near
+			-- the island NPC region — workspace.Enemies will populate within
+			-- 3-5 seconds and the next tick handles the snap.
+			--
+			-- Gate is loose (300 stud XZ / 80 Y) so combat drift doesn't
+			-- trigger re-snap each tick and cause oscillation. We only snap
+			-- when we're clearly on the wrong platform / wrong island corner.
+			local centroid = discoverSubZone(quest.mob)
+			if centroid then
+				local ch = LocalPlayer.Character
+				local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+				if hrp then
+					local dx = hrp.Position.X - centroid.X
+					local dz = hrp.Position.Z - centroid.Z
+					local xzDist = math.sqrt(dx*dx + dz*dz)
+					local yDiff = math.abs(hrp.Position.Y - centroid.Y)
+					if xzDist > 300 or yDiff > 80 then
+						hoverEnabled = false
+						hrp.CFrame = CFrame.new(centroid + Vector3.new(0, 6, 0))
+						task.wait(0.4)
+						if _hoverBP and _hoverBP.Parent then
+							_hoverBP.Position = hrp.Position
 						end
+						hoverEnabled = true
 					end
 				end
 			end
