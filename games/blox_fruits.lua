@@ -422,9 +422,13 @@ function Module.start(lib)
 	-- Skylands has multiple floating platforms at different Y levels. After
 	-- the portal drops you at SkyArea1 (Y~874), tween to the right platform
 	-- for the current quest mob. Keyed by SEA1_QUESTS mob name.
+	-- Skylands sub-platform spawn centroids — measured live from
+	-- workspace.Enemies, not estimated from the map. AGENTS.md had Dark Master
+	-- at (-4948, 440, -2984) which is empty air ~700 studs SE of the actual
+	-- spawn cluster. These are the real centroids of 4 DM and 3 SB spawns.
 	local SKY_SUB_ZONE = {
-		["Sky Bandit"]  = Vector3.new(-4948, 277, -2984),
-		["Dark Master"] = Vector3.new(-4948, 440, -2984),
+		["Sky Bandit"]  = Vector3.new(-4963, 277, -2876),
+		["Dark Master"] = Vector3.new(-5247, 387, -2263),
 	}
 
 	-- Island TP — pisun-hub pattern, the one that actually works.
@@ -570,23 +574,20 @@ function Module.start(lib)
 			-- Skylands sub-zone navigation: the portal drops you at SkyArea1
 			-- (Y~874), but the mobs for your level range live on different
 			-- floating platforms. Use Data.Level to pick the right platform
-			-- and tween there.
+			-- and direct-CFrame-snap there. Coords pulled from SKY_SUB_ZONE
+			-- (live-measured spawn centroids, not estimates).
 			if name == "Skylands" then
 				local data = LocalPlayer:FindFirstChild("Data")
 				local lvl = data and data:FindFirstChild("Level") and data.Level.Value or 0
-				local targetPos -- nil = stay at SkyArea1 (default portal drop)
+				local targetPos
 				if lvl >= 150 and lvl <= 174 then
-					targetPos = Vector3.new(-4948, 277, -2984) -- Sky Bandit island
+					targetPos = SKY_SUB_ZONE["Sky Bandit"]
 				elseif lvl >= 175 and lvl <= 189 then
-					targetPos = Vector3.new(-4948, 440, -2984) -- Dark Master island
+					targetPos = SKY_SUB_ZONE["Dark Master"]
 				end
 				if targetPos then
-					local yDiff = math.abs(targetPos.Y - hrp.Position.Y)
-					if yDiff > Y_SNAP_THRESHOLD then
-						hrp.CFrame = CFrame.new(hrp.Position.X, targetPos.Y, hrp.Position.Z)
-						task.wait(0.5)
-					end
-					_tweenHRPTo(hrp, targetPos)
+					hrp.CFrame = CFrame.new(targetPos + Vector3.new(0, 4, 0))
+					task.wait(0.4)
 				end
 			end
 		else
@@ -1008,40 +1009,38 @@ function Module.start(lib)
 			end
 
 			-- Skylands sub-zone navigation: move to the correct floating platform
-			-- for the current quest target. Uses BodyPosition physics (same as
-			-- combat movement) instead of TweenService/CFrame which BF anti-cheat
-			-- blocks for large Y movement. Always runs (not gated on Q.accepted)
-			-- so the character returns to the right platform even when quest
-			-- fails. The distance gate (<25) prevents redundant movement.
+			-- for the current quest target. Direct CFrame snap — the previous
+			-- BodyPosition rewrite was solving a phantom problem. Live probe
+			-- confirmed BF anti-cheat tolerates downward + diagonal CFrame snaps
+			-- here (339-stud diagonal from main landmass to Dark Master platform
+			-- accepted, no rollback). Always runs (not gated on Q.accepted) so
+			-- the character returns to the right platform if combat drift pulls
+			-- them off. <25 stud distance gate prevents redundant snaps.
 			if quest.island == "Skylands" then
 				local targetPos = SKY_SUB_ZONE[quest.mob]
 				if targetPos then
 					local ch = LocalPlayer.Character
 					local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
-					if hrp and (hrp.Position - targetPos).Magnitude > 25 then
-						-- Temporarily pause hover Heartbeat so it doesn't overwrite
-						-- our BP target (heartbeat sets BP to maintain current Y).
-						-- BodyPosition physics + gravity handles descent naturally.
-						hoverEnabled = false
-						if _hoverBP and _hoverBP.Parent then
-							_hoverBP.P = 600
-							_hoverBP.D = 80
-							_hoverBP.Position = targetPos
-						end
-						if _hoverBG and _hoverBG.Parent then
-							_hoverBG.CFrame = CFrame.new(hrp.Position, hrp.Position - Vector3.new(0, 0, 1))
-						end
-						-- Wait for physics to move us, maintaining noclip
-						for _ = 1, 40 do
-							task.wait(0.2)
-							if not hrp.Parent then break end
-							hrp.CanCollide = false
-							if (hrp.Position - targetPos).Magnitude < 25 then break end
+					if hrp then
+						-- Gate by "are we on the right sub-platform" not "are we
+						-- at the exact centroid". Combat drift carries us 80+
+						-- studs toward the nearest mob — a strict gate triggers
+						-- re-snap each tick and oscillates. Tolerate 250-stud
+						-- XZ roaming, snap back only on big Y altitude change
+						-- (means we're on the wrong platform).
+						local dx = hrp.Position.X - targetPos.X
+						local dz = hrp.Position.Z - targetPos.Z
+						local xzDist = math.sqrt(dx*dx + dz*dz)
+						local yDiff = math.abs(hrp.Position.Y - targetPos.Y)
+						if xzDist > 250 or yDiff > 60 then
+							hoverEnabled = false
+							hrp.CFrame = CFrame.new(targetPos + Vector3.new(0, 4, 0))
+							task.wait(0.4)
 							if _hoverBP and _hoverBP.Parent then
-								_hoverBP.Position = targetPos
+								_hoverBP.Position = hrp.Position
 							end
+							hoverEnabled = true
 						end
-						hoverEnabled = true
 					end
 				end
 			end
