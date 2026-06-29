@@ -1642,13 +1642,29 @@ function Module.start(lib)
 									cfg.farmLevelMin   = 1
 									cfg.farmLevelMax   = 9999
 								else
-									-- Quest IS active — tween toward island center
-									-- to trigger spawns, but only if we're NOT already
-									-- at the island. This guard prevents undoing
-									-- Skylands sub-zone placement: after the sub-zone
-									-- nav put us on the correct platform, atIsland
-									-- returns true, so we don't tween back to the tower.
-									if not atIsland(Q.current.island) then
+									-- Quest IS active but mobs haven't respawned
+									-- yet. Try the EnemySpawns centroid first —
+									-- that's where mobs actually live. For Togas,
+									-- island.pos is Prison main (5K studs from
+									-- their spawn zone), so the fallback used to
+									-- yank us back to Prison every 6 seconds even
+									-- after we'd successfully snapped to the
+									-- Colosseum. discoverSubZone falls back to
+									-- _WorldOrigin.EnemySpawns when no live mobs
+									-- exist (Pass B), so this works generically.
+									local sub = discoverSubZone(mobName)
+									if sub then
+										dbg("fallback-subzone", mobName)
+										local dest = sub + Vector3.new(0, cfg.farmHeight, 0)
+										_tweenHRPTo(hrp2, dest)
+										if _hoverBP and _hoverBP.Parent then
+											_hoverBP.P, _hoverBP.D = 600, 80
+											_hoverBP.Position = dest
+										end
+									elseif not atIsland(Q.current.island) then
+										-- Last-resort: no live mobs, no spawn
+										-- anchors found. Tween to the island
+										-- center to nudge BF into spawning mobs.
 										local island = ISLAND_BY_NAME[Q.current.island]
 										if island then
 											dbg("fallback-tp", Q.current.island)
