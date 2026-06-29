@@ -2275,16 +2275,16 @@ function Module.start(lib)
 		-- Backpack populates AFTER the character spawns. Spin briefly
 		-- waiting for at least one equippable weapon to land in it.
 		local deadline = tick() + 8
-		while tick() < deadline do
+		local bpReady = false
+		while not bpReady and tick() < deadline do
 			local bp = LocalPlayer:FindFirstChildOfClass("Backpack")
 			if bp then
 				for _, t in ipairs(bp:GetChildren()) do
-					if _isEquippableWeapon(t) then goto bp_ready end
+					if _isEquippableWeapon(t) then bpReady = true; break end
 				end
 			end
-			task.wait(0.2)
+			if not bpReady then task.wait(0.2) end
 		end
-		::bp_ready::
 
 		_tpInProgress = false
 		safe(ensureWeaponEquipped)
