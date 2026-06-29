@@ -82,8 +82,14 @@ function Module.start(lib)
 		abilitySlots = { Z = false, X = false, C = false, V = false, F = false },
 		abilityCadence = 2.0,        -- sec between ability activations
 
-		-- island ESP
-		espIslands = true,           -- billboard names over each island
+		-- visuals / ESP
+		espIslands   = true,         -- billboard names over each island
+		espPlayers   = false,        -- name + distance + HP bar over other players
+		espChests    = false,        -- Silver/Gold/Diamond chest markers
+		espFruits    = false,        -- spawned devil fruits in workspace.Characters
+		espBosses    = false,        -- mini-bosses + named bosses in workspace.Enemies
+		espQuestMob  = false,        -- current quest mob — green highlight + label
+		espMaxDist   = 0,            -- 0 = unlimited; otherwise hide beyond N studs
 
 		-- stat allocation
 		autoStats = false,
@@ -828,6 +834,285 @@ function Module.start(lib)
 				group   = "islands",
 				yOffset = 0,
 			})
+		end
+	end
+
+	-- ═══════════════════════════ PLAYER / CHEST / FRUIT / BOSS ESP ════════════
+	-- Live trackers that scan workspace periodically (1Hz) and (a) attach
+	-- billboards + highlights for new targets, (b) update distance text on
+	-- existing ones, (c) detach when targets disappear. One Heartbeat would
+	-- be wasteful — the 1s cadence is fine for ESP latency.
+
+	-- Tracker registry: groupName → { [instanceKey] = { hl, bb, lastSeen } }
+	local _espTrackers = {}
+
+	local function _espGet(group) _espTrackers[group] = _espTrackers[group] or {} return _espTrackers[group] end
+
+	-- BF boss/mini-boss roster — high-HP enemies worth marking. We could
+	-- detect purely by MaxHealth > N, but named bosses sometimes spawn with
+	-- variable HP scaling. This list catches both axes.
+	local BOSS_NAMES = {
+		["Yeti"] = true, ["Mr. Officer"] = true, ["Tide Keeper"] = true,
+		["Magma Admiral"] = true, ["Cursed Captain"] = true,
+		["Ship Steerer"] = true, ["Greybeard"] = true, ["Diamond"] = true,
+		["Smoke Admiral"] = true, ["Awakened Ice Admiral"] = true,
+		["Mihawk"] = true, ["Don Swan"] = true, ["Cyborg"] = true,
+		["Stone"] = true, ["Royal Pirate Captain"] = true,
+		["King Red Head"] = true, ["Bobby"] = true, ["Saber Expert"] = true,
+		["Warden"] = true, ["Chief Warden"] = true,
+		["Swan"] = true, ["Vice Admiral"] = true, ["Fishman Lord"] = true,
+		["Wysper"] = true, ["Thunder God"] = true, ["Cyborg V2"] = true,
+		["rip_indra True Form"] = true, ["Soul Reaper"] = true,
+	}
+
+	-- One-shot detach helper for a tracker entry
+	local function _espDetachEntry(group, key)
+		local t = _espGet(group)
+		local entry = t[key]
+		if not entry then return end
+		if entry.bbHandle then ESP.detach(entry.bbHandle) end
+		if entry.hlHandle then ESP.detach(entry.hlHandle) end
+		t[key] = nil
+	end
+
+	local function _espDetachAll(group)
+		local t = _espGet(group)
+		for key in pairs(t) do _espDetachEntry(group, key) end
+	end
+
+	-- Distance in studs from local HRP, or nil if no local character.
+	local function _distFromMe(part)
+		local ch = LocalPlayer.Character
+		local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+		if not hrp or not part then return nil end
+		return (part.Position - hrp.Position).Magnitude
+	end
+
+	-- ─── PLAYER ESP ───
+	-- One billboard + highlight per other player. Team-coded:
+	--   friend (same team / crew) → green
+	--   yourself                  → skipped
+	--   enemy                     → red
+	-- Distance is updated on every scan tick so the user can prioritize
+	-- targets without staring at the world.
+	local function _playerColor(plr)
+		if plr.Team and LocalPlayer.Team and plr.Team == LocalPlayer.Team then
+			return Color3.fromRGB(120, 220, 120)  -- ally green
+		end
+		return Color3.fromRGB(255, 90, 90)        -- hostile red
+	end
+
+	local function scanPlayerESP()
+		local t = _espGet("players")
+		if not cfg.espPlayers then _espDetachAll("players"); return end
+		local Players = game:GetService("Players")
+		local seen = {}
+		for _, plr in ipairs(Players:GetPlayers()) do
+			if plr ~= LocalPlayer then
+				local ch = plr.Character
+				local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+				local hum = ch and ch:FindFirstChild("Humanoid")
+				if hrp and hum and hum.Health > 0 then
+					seen[plr] = true
+					local dist = _distFromMe(hrp) or 0
+					if cfg.espMaxDist > 0 and dist > cfg.espMaxDist then
+						_espDetachEntry("players", plr)
+					else
+						local entry = t[plr]
+						if not entry or not entry.bbHandle then
+							local color = _playerColor(plr)
+							local bbH = ESP.billboard({
+								adornee = hrp, text = plr.DisplayName or plr.Name,
+								sub = string.format("Lv ? • %d studs • HP %d/%d", dist, hum.Health, hum.MaxHealth),
+								color = color, group = "players",
+							})
+							local hlH = ESP.highlight({
+								adornee = ch, color = color, fillTransparency = 0.85,
+								outlineTransparency = 0.1, group = "players",
+							})
+							t[plr] = { bbHandle = bbH, hlHandle = hlH, char = ch }
+						else
+							-- Character rebuild? Detach + recreate next tick.
+							if entry.char ~= ch then
+								_espDetachEntry("players", plr)
+							else
+								ESP.setBillboardText(entry.bbHandle, plr.DisplayName or plr.Name,
+									string.format("%d studs • HP %d/%d", dist, hum.Health, hum.MaxHealth))
+							end
+						end
+					end
+				end
+			end
+		end
+		-- Detach any tracked players no longer in seen
+		for key in pairs(t) do
+			if not seen[key] then _espDetachEntry("players", key) end
+		end
+	end
+
+	-- ─── CHEST ESP ───
+	-- workspace.ChestModels — SilverChest / GoldChest / DiamondChest dropped
+	-- by the server on a timer. Tier colors: silver = white, gold = yellow,
+	-- diamond = cyan. Distance in studs.
+	local function _chestColor(name)
+		if name:find("Diamond") then return Color3.fromRGB(120, 230, 255) end
+		if name:find("Gold")    then return Color3.fromRGB(255, 215,  80) end
+		return Color3.fromRGB(220, 220, 220)  -- silver / default
+	end
+
+	local function scanChestESP()
+		local t = _espGet("chests")
+		if not cfg.espChests then _espDetachAll("chests"); return end
+		local container = workspace:FindFirstChild("ChestModels")
+		if not container then return end
+		local seen = {}
+		for _, c in ipairs(container:GetChildren()) do
+			local part = c:IsA("BasePart") and c or c:FindFirstChildWhichIsA("BasePart")
+			if part then
+				seen[c] = true
+				local dist = _distFromMe(part) or 0
+				if cfg.espMaxDist > 0 and dist > cfg.espMaxDist then
+					_espDetachEntry("chests", c)
+				elseif not t[c] then
+					local color = _chestColor(c.Name)
+					local bbH = ESP.billboard({
+						adornee = part, text = c.Name:gsub("Chest", " Chest"),
+						sub = string.format("%d studs", dist),
+						color = color, group = "chests",
+					})
+					t[c] = { bbHandle = bbH, part = part, color = color }
+				else
+					ESP.setBillboardText(t[c].bbHandle, nil, string.format("%d studs", dist))
+				end
+			end
+		end
+		for key in pairs(t) do if not seen[key] then _espDetachEntry("chests", key) end end
+	end
+
+	-- ─── DEVIL FRUIT ESP ───
+	-- Dropped fruits live in workspace.Characters as models named like
+	-- "bloxfruitguloso22" (bloxfruit prefix + spawner ID). The actual fruit
+	-- type is in the Handle.ToolTip when it becomes a Tool, but on the
+	-- ground it's just a model — we show "Devil Fruit" generic + distance.
+	local function scanFruitESP()
+		local t = _espGet("fruits")
+		if not cfg.espFruits then _espDetachAll("fruits"); return end
+		local container = workspace:FindFirstChild("Characters")
+		if not container then return end
+		local seen = {}
+		for _, c in ipairs(container:GetChildren()) do
+			if c.Name:sub(1, 9):lower() == "bloxfruit" then
+				local part = c:FindFirstChild("Handle") or c:FindFirstChildWhichIsA("BasePart")
+				if part then
+					seen[c] = true
+					local dist = _distFromMe(part) or 0
+					if cfg.espMaxDist > 0 and dist > cfg.espMaxDist then
+						_espDetachEntry("fruits", c)
+					elseif not t[c] then
+						local bbH = ESP.billboard({
+							adornee = part, text = "Devil Fruit",
+							sub = string.format("%d studs", dist),
+							color = Color3.fromRGB(255, 130, 230),
+							group = "fruits",
+						})
+						local hlH = ESP.highlight({
+							adornee = c, color = Color3.fromRGB(255, 130, 230),
+							fillTransparency = 0.6, outlineTransparency = 0.0, group = "fruits",
+						})
+						t[c] = { bbHandle = bbH, hlHandle = hlH, part = part }
+					else
+						ESP.setBillboardText(t[c].bbHandle, nil, string.format("%d studs", dist))
+					end
+				end
+			end
+		end
+		for key in pairs(t) do if not seen[key] then _espDetachEntry("fruits", key) end end
+	end
+
+	-- ─── BOSS ESP ───
+	-- High-HP enemies + named bosses in workspace.Enemies. Outline only —
+	-- the billboard would clutter the screen during normal farming where
+	-- bosses share the world with regular mobs.
+	local function _isBoss(e, hum)
+		if BOSS_NAMES[e.Name] then return true end
+		if hum and hum.MaxHealth > 5000 then return true end
+		return false
+	end
+
+	local function scanBossESP()
+		local t = _espGet("bosses")
+		if not cfg.espBosses then _espDetachAll("bosses"); return end
+		local enemies = workspace:FindFirstChild("Enemies")
+		if not enemies then return end
+		local seen = {}
+		for _, e in ipairs(enemies:GetChildren()) do
+			local hum = e:FindFirstChild("Humanoid")
+			local hrp = e:FindFirstChild("HumanoidRootPart")
+			if hrp and hum and hum.Health > 0 and _isBoss(e, hum) then
+				seen[e] = true
+				local dist = _distFromMe(hrp) or 0
+				if cfg.espMaxDist > 0 and dist > cfg.espMaxDist then
+					_espDetachEntry("bosses", e)
+				elseif not t[e] then
+					local color = Color3.fromRGB(255, 170, 60)  -- amber for bosses
+					local bbH = ESP.billboard({
+						adornee = hrp, text = e.Name,
+						sub = string.format("HP %d/%d • %d studs", math.floor(hum.Health), math.floor(hum.MaxHealth), dist),
+						color = color, group = "bosses",
+					})
+					local hlH = ESP.highlight({
+						adornee = e, color = color, fillTransparency = 0.75,
+						outlineTransparency = 0.1, group = "bosses",
+					})
+					t[e] = { bbHandle = bbH, hlHandle = hlH, hum = hum }
+				else
+					ESP.setBillboardText(t[e].bbHandle, nil,
+						string.format("HP %d/%d • %d studs", math.floor(hum.Health), math.floor(hum.MaxHealth), dist))
+				end
+			end
+		end
+		for key in pairs(t) do if not seen[key] then _espDetachEntry("bosses", key) end end
+	end
+
+	-- ─── QUEST MOB ESP ───
+	-- Highlight every alive instance of the current quest mob in a distinct
+	-- green so the user can see where the auto-farm is engaging without
+	-- toggling player ESP for clutter. Only fires when Q.current is set.
+	local function scanQuestMobESP()
+		local t = _espGet("questmob")
+		if not cfg.espQuestMob or not Q.current then _espDetachAll("questmob"); return end
+		local mobName = Q.current.mob
+		local enemies = workspace:FindFirstChild("Enemies")
+		if not enemies then return end
+		local seen = {}
+		for _, e in ipairs(enemies:GetChildren()) do
+			if e.Name == mobName then
+				local hum = e:FindFirstChild("Humanoid")
+				if hum and hum.Health > 0 then
+					seen[e] = true
+					if not t[e] then
+						local hlH = ESP.highlight({
+							adornee = e, color = Color3.fromRGB(120, 255, 140),
+							fillTransparency = 0.8, outlineTransparency = 0.0, group = "questmob",
+						})
+						t[e] = { hlHandle = hlH }
+					end
+				end
+			end
+		end
+		for key in pairs(t) do if not seen[key] then _espDetachEntry("questmob", key) end end
+	end
+
+	-- Single 1Hz scan tick that fans out to all ESP scanners. Cheap — each
+	-- scanner short-circuits when its cfg flag is off.
+	local function espScanLoop()
+		while _running do
+			safe(scanPlayerESP)
+			safe(scanChestESP)
+			safe(scanFruitESP)
+			safe(scanBossESP)
+			safe(scanQuestMobESP)
+			task.wait(1.0)
 		end
 	end
 
@@ -1726,14 +2011,8 @@ function Module.start(lib)
 		{ 25, 50, 100, 250, 500, 9999 })
 
 	-- ─── SEA 1 TAB ───
-	-- Kept for island ESP + manual TP. The old auto-progression toggle
-	-- is superseded by Auto Farm Level on the Farm tab.
+	-- Manual TP only. ESP toggles moved to the Visuals tab.
 	local sea1 = ui.newPage("sea1")
-
-	ui.sectionLabel(sea1, "ISLAND ESP")
-	ui.toggleRow(sea1, "Show island markers",
-		function() return cfg.espIslands end,
-		function(v) cfg.espIslands = v; buildIslandESP() end)
 
 	ui.sectionLabel(sea1, "MANUAL TP")
 	local islandOptions = {}
@@ -1760,6 +2039,39 @@ function Module.start(lib)
 				key   = "tp:" .. name,
 			})
 		end)
+
+	-- ─── VISUALS TAB ───
+	-- ESP toggles. Each toggle short-circuits a 1Hz scan loop — turning a
+	-- group off detaches all its billboards/highlights immediately.
+	local visuals = ui.newPage("visuals")
+
+	ui.sectionLabel(visuals, "WORLD MARKERS")
+	ui.toggleRow(visuals, "Island markers",
+		function() return cfg.espIslands end,
+		function(v) cfg.espIslands = v; buildIslandESP() end)
+	ui.toggleRow(visuals, "Chests (Silver / Gold / Diamond)",
+		function() return cfg.espChests end,
+		function(v) cfg.espChests = v end)
+	ui.toggleRow(visuals, "Devil fruits on the ground",
+		function() return cfg.espFruits end,
+		function(v) cfg.espFruits = v end)
+
+	ui.sectionLabel(visuals, "ENTITIES")
+	ui.toggleRow(visuals, "Players (name • HP • distance)",
+		function() return cfg.espPlayers end,
+		function(v) cfg.espPlayers = v end)
+	ui.toggleRow(visuals, "Bosses (mini + named)",
+		function() return cfg.espBosses end,
+		function(v) cfg.espBosses = v end)
+	ui.toggleRow(visuals, "Current quest mob (green outline)",
+		function() return cfg.espQuestMob end,
+		function(v) cfg.espQuestMob = v end)
+
+	ui.sectionLabel(visuals, "RANGE")
+	ui.intervalRow(visuals, "Max distance (0 = unlimited)",
+		function() return cfg.espMaxDist end,
+		function(v) cfg.espMaxDist = v end,
+		{ 0, 250, 500, 1000, 2500, 5000 })
 
 	-- ─── STATS TAB ───
 	local statsPage = ui.newPage("stats")
@@ -1833,8 +2145,9 @@ function Module.start(lib)
 
 	ui.newTab("farm",     "Farm",     1)
 	ui.newTab("sea1",     "Sea 1",    2)
-	ui.newTab("stats",    "Stats",    3)
-	ui.newTab("settings", "Settings", 4)
+	ui.newTab("visuals",  "Visuals",  3)
+	ui.newTab("stats",    "Stats",    4)
+	ui.newTab("settings", "Settings", 5)
 	ui.setActiveTab("farm")
 
 	local function makeFloatingIcon()
@@ -1895,6 +2208,7 @@ function Module.start(lib)
 	task.spawn(abilityRotationLoop)
 	task.spawn(autoStatsLoop)
 	task.spawn(trackProgressLoop)
+	task.spawn(espScanLoop)
 	antiAfkLoop()
 
 	Toast.show({
