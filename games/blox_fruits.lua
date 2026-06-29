@@ -84,6 +84,13 @@ function Module.start(lib)
 		abilitySlots = { Z = false, X = false, C = false, V = false, F = false },
 		abilityCadence = 2.0,        -- sec between ability activations
 
+		-- fruit sniper — auto-tween to dropped devil fruits and let
+		-- natural collision pickup grab them. Pure passive collection,
+		-- no remote firing (BF pickup is collision-only via Tool.Handle).
+		fruitSniper      = false,    -- master switch
+		snipeMaxDist     = 5000,     -- don't fly past this for a fruit
+		snipeSkipCommons = true,     -- ignore Bomb/Spike/Spring/etc
+
 		-- visuals / ESP
 		espIslands   = true,         -- billboard names over each island
 		espPlayers   = false,        -- card with name·lv / race·fruit / HP bar
@@ -1331,6 +1338,169 @@ function Module.start(lib)
 	-- missing — connecting once at module init is safe.
 	RunService.Heartbeat:Connect(function() safe(_tracerFrame) end)
 
+	-- ═══════════════════════════ FRUIT SNIPER ═══════════════════════════
+	-- Watches workspace.Characters for new bloxfruit* models. When one
+	-- matches the user's snipe criteria, pauses auto-farm, multi-hop tweens
+	-- to the Handle, lets natural collision pickup grab it, resumes farm.
+	--
+	-- Safety:
+	--   - Pickup is collision-only — we never fire a remote. BF's natural
+	--     Tool.Handle.Touched moves the Tool into our Backpack server-side.
+	--     Hubs that fire pickup remotes get users kicked; we don't.
+	--   - Movement uses _tweenHRPTo's segmented tween (verified survives
+	--     anti-cheat up to 60K studs). Same path tpToIsland uses.
+	--   - cfg.snipeMaxDist gates extreme cross-server flights.
+	--   - Pauses autoFarm (sets _tpInProgress) so the farm loop doesn't
+	--     fight us mid-snipe. Restores on completion or timeout.
+	--   - Single-flight queue: only one snipe in progress at a time. New
+	--     fruits during a snipe queue behind the current one.
+
+	-- Common fruits worth skipping. Inventory junk that slows down rare
+	-- pickups when FruitCap=1 and we'd have to drop them anyway.
+	local COMMON_FRUITS = {
+		["Bomb-Bomb"] = true, ["Spike-Spike"] = true, ["Spring-Spring"] = true,
+		["Chop-Chop"] = true, ["Smoke-Smoke"] = true, ["Spin-Spin"] = true,
+		["Flame-Flame"] = true, ["Bird-Bird"] = true, ["Kilo-Kilo"] = true,
+		["Rocket-Rocket"] = true, ["Wolf-Wolf"] = true,
+	}
+
+	-- Extract the fruit ID from a workspace.Characters model. The Tool
+	-- inside is named like "Mera-Mera" / "Buddha-Buddha". Returns nil if
+	-- the model isn't a fruit (or hasn't loaded yet).
+	local function _fruitIdOf(model)
+		for _, c in ipairs(model:GetChildren()) do
+			if c:IsA("Tool") and c.Name:find("-") then
+				return c.Name
+			end
+		end
+		return nil
+	end
+
+	-- Should the sniper bite this one? Gates on master toggle, common
+	-- filter, and distance.
+	local function _shouldSnipe(model)
+		if not cfg.fruitSniper then return false end
+		local fid = _fruitIdOf(model)
+		if not fid then return false end
+		if cfg.snipeSkipCommons and COMMON_FRUITS[fid] then return false end
+		local handle = model:FindFirstChild("Handle") or model:FindFirstChildWhichIsA("BasePart")
+		if not handle then return false end
+		local dist = _distFromMe(handle)
+		if not dist then return false end
+		if cfg.snipeMaxDist > 0 and dist > cfg.snipeMaxDist then return false end
+		return true, fid, handle
+	end
+
+	local _snipeBusy = false
+	local _snipeQueue = {}
+
+	local function _runSnipe(model, fid, handle)
+		_snipeBusy = true
+		local ch = LocalPlayer.Character
+		local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+		if not hrp then _snipeBusy = false; return end
+
+		Toast.show({
+			title = "Sniping",
+			body  = fid:gsub("-", " ") .. "  •  " .. math.floor(_distFromMe(handle) or 0) .. " studs",
+			kind  = "info", duration = 3,
+			key   = "snipe:" .. fid,
+		})
+
+		-- Pause autoFarm and tear down flight, mirroring tpToIsland's setup.
+		-- Without this the BodyPosition fights the tween → BF rolls back the
+		-- character → kick risk. This is the lesson from the Colosseum bug.
+		local restoreAutoFarm = cfg.autoFarm
+		local restoreAutoFL   = cfg.autoFarmLevel
+		_tpInProgress = true
+		cfg.autoFarm = false
+		cfg.autoFarmLevel = false
+		safe(_stopFlightFn)
+
+		-- Target the Handle's CURRENT position each hop (fruits can drift
+		-- slightly via physics if BF doesn't anchor them perfectly).
+		local arrived = false
+		for attempt = 1, 3 do
+			if not handle or not handle.Parent then break end
+			if not model or not model.Parent then break end  -- already picked up
+			local dest = handle.Position + Vector3.new(0, 2, 0)
+			safe(function() _tweenHRPTo(hrp, dest) end)
+			-- Give Tool.Handle.Touched a moment to fire server-side
+			task.wait(0.4)
+			if not model.Parent then arrived = true; break end
+			-- Still in workspace? Maybe we landed just outside the touch
+			-- radius. Try a tiny nudge directly onto the Handle.
+			if hrp and handle and handle.Parent then
+				local d = (handle.Position - hrp.Position).Magnitude
+				if d > 8 then
+					-- Far miss — retry tween next loop
+				else
+					-- Close — nudge directly to the Handle
+					hrp.CFrame = CFrame.new(handle.Position + Vector3.new(0, 1, 0))
+					task.wait(0.5)
+					if not model.Parent then arrived = true; break end
+				end
+			end
+		end
+
+		_tpInProgress = false
+		cfg.autoFarm = restoreAutoFarm
+		cfg.autoFarmLevel = restoreAutoFL
+		safe(startFlight)
+
+		if arrived then
+			Toast.show({
+				title = "Grabbed",
+				body  = fid:gsub("-", " "),
+				kind  = "success", duration = 4,
+				key   = "snipe:grab:" .. fid,
+			})
+		end
+		_snipeBusy = false
+	end
+
+	local function _trySnipe(model)
+		if _snipeBusy then table.insert(_snipeQueue, model); return end
+		local ok, fid, handle = _shouldSnipe(model)
+		if ok then _runSnipe(model, fid, handle) end
+	end
+
+	-- Drain the queue after each snipe completes.
+	task.spawn(function()
+		while _running do
+			if not _snipeBusy and #_snipeQueue > 0 then
+				local model = table.remove(_snipeQueue, 1)
+				if model and model.Parent then
+					local ok, fid, handle = _shouldSnipe(model)
+					if ok then _runSnipe(model, fid, handle) end
+				end
+			end
+			task.wait(0.5)
+		end
+	end)
+
+	-- ChildAdded fires the moment BF parents a new fruit. Cheaper and
+	-- more responsive than scanning every tick. We also do a one-shot
+	-- pass at script load for any fruits already on the ground.
+	local charactersFolder = workspace:FindFirstChild("Characters")
+	if charactersFolder then
+		charactersFolder.ChildAdded:Connect(function(model)
+			-- BF parents the Model first, then populates children. Wait a
+			-- bit so _fruitIdOf can find the inner Tool.
+			task.wait(0.6)
+			if model.Parent and model.Name:sub(1, 9):lower() == "bloxfruit" then
+				_trySnipe(model)
+			end
+		end)
+		-- Initial sweep
+		task.spawn(function()
+			task.wait(2)
+			for _, m in ipairs(charactersFolder:GetChildren()) do
+				if m.Name:sub(1, 9):lower() == "bloxfruit" then _trySnipe(m) end
+			end
+		end)
+	end
+
 	-- ═══════════════════════════ LOOPS ═══════════════════════════
 
 	-- One always-on flight connection while auto-farm is enabled. Picks
@@ -2340,6 +2510,18 @@ function Module.start(lib)
 	ui.toggleRow(visuals, "Current quest mob (green outline)",
 		function() return cfg.espQuestMob end,
 		function(v) cfg.espQuestMob = v end)
+
+	ui.sectionLabel(visuals, "FRUIT SNIPER")
+	ui.toggleRow(visuals, "Auto-grab dropped fruits",
+		function() return cfg.fruitSniper end,
+		function(v) cfg.fruitSniper = v end)
+	ui.toggleRow(visuals, "Skip common fruits (Bomb, Spike, Smoke, etc)",
+		function() return cfg.snipeSkipCommons end,
+		function(v) cfg.snipeSkipCommons = v end)
+	ui.sliderRow(visuals, "Snipe max distance",
+		function() return cfg.snipeMaxDist end,
+		function(v) cfg.snipeMaxDist = v end,
+		{ min = 500, max = 10000, step = 100, suffix = " st" })
 
 	ui.sectionLabel(visuals, "EXTRAS")
 	ui.toggleRow(visuals, "Tracer lines from screen-center",
