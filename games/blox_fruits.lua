@@ -74,6 +74,8 @@ function Module.start(lib)
 		-- auto farm level (replaces autoSea1)
 		autoFarmLevel = false,       -- full quest lifecycle (accept → farm → detect done → re-accept)
 		autoSea1 = false,            -- kept for backward compat, driven by autoFarmLevel
+		skipBossQuests = true,       -- skip 1-kill boss quests (Warden, Chief Warden, etc) —
+		                             -- ~5min spawn timers tank XP/hour vs regular mob quests
 
 		-- weapon selection
 		selectedWeapon = "",         -- name of weapon to auto-equip ("" = first available)
@@ -622,8 +624,8 @@ function Module.start(lib)
 		{ lvlMin = 175, lvlMax = 189, island = "Skylands",        questId = "SkyQuest",      tier = 2, mob = "Dark Master",     taskCount = 8 },
 		{ lvlMin = 190, lvlMax = 209, island = "Prison",          questId = "PrisonerQuest", tier = 1, mob = "Prisoner",          taskCount = 8 },
 		{ lvlMin = 210, lvlMax = 219, island = "Prison",          questId = "PrisonerQuest", tier = 2, mob = "Dangerous Prisoner", taskCount = 8 },
-		{ lvlMin = 220, lvlMax = 229, island = "Prison",          questId = "ImpelQuest",    tier = 1, mob = "Warden",            taskCount = 1 },
-		{ lvlMin = 230, lvlMax = 249, island = "Prison",          questId = "ImpelQuest",    tier = 2, mob = "Chief Warden",      taskCount = 1 },
+		{ lvlMin = 220, lvlMax = 229, island = "Prison",          questId = "ImpelQuest",    tier = 1, mob = "Warden",            taskCount = 1, boss = true },
+		{ lvlMin = 230, lvlMax = 249, island = "Prison",          questId = "ImpelQuest",    tier = 2, mob = "Chief Warden",      taskCount = 1, boss = true },
 		{ lvlMin = 250, lvlMax = 274, island = "Prison",          questId = "ColosseumQuest",tier = 1, mob = "Toga Warrior",    taskCount = 7 },
 		{ lvlMin = 275, lvlMax = 324, island = "Prison",          questId = "ColosseumQuest",tier = 2, mob = "Gladiator",       taskCount = 8 },
 		{ lvlMin = 325, lvlMax = 374, island = "Magma Village",   questId = "MagmaQuest",    tier = 1, mob = "Military Soldier",taskCount = 7 },
@@ -635,11 +637,35 @@ function Module.start(lib)
 	}
 
 	-- Picks the highest-level-fit quest for a given player level.
-	-- Iterates from end so higher-level entries win (later rows = higher tier).
+	-- Iterates forward so higher-tier rows (later in the atlas) win when
+	-- multiple match. With cfg.skipBossQuests on, boss rows are filtered:
+	-- the user prefers to keep grinding regular mob quests (~5-9 mobs per
+	-- cycle, fast XP) over Warden / Chief Warden quests (1 boss kill but
+	-- ~5min spawn timer per the user's estimate). When the current level
+	-- range is ALL boss, fall back to the highest-lvlMin non-boss row our
+	-- level still qualifies for — so at Lv 220-249 we keep farming
+	-- Dangerous Prisoners (lvlMin=210) instead of idling for Wardens.
 	local function pickQuest(level)
 		local best
 		for _, q in ipairs(SEA1_QUESTS) do
-			if level >= q.lvlMin and level <= q.lvlMax then best = q end
+			if level >= q.lvlMin and level <= q.lvlMax then
+				if not (cfg.skipBossQuests and q.boss) then
+					best = q
+				end
+			end
+		end
+		-- Filtered out the only in-range row(s) — walk backward for the
+		-- nearest non-boss quest whose minimum level we exceed. ipairs
+		-- order is the atlas order (low → high level), so iterating from
+		-- the end gives us the highest-level non-boss tier we qualify for.
+		if not best and cfg.skipBossQuests then
+			for i = #SEA1_QUESTS, 1, -1 do
+				local q = SEA1_QUESTS[i]
+				if not q.boss and level >= q.lvlMin then
+					best = q
+					break
+				end
+			end
 		end
 		return best
 	end
@@ -1684,6 +1710,18 @@ function Module.start(lib)
 			else
 				cfg.autoFarm = false
 				safe(_stopFlightFn)
+			end
+		end)
+	ui.toggleRow(farm, "Skip boss quests (Warden, etc — slow spawn)",
+		function() return cfg.skipBossQuests end,
+		function(v)
+			cfg.skipBossQuests = v
+			-- Force re-pick on next loop tick by clearing the current key.
+			-- Without this, an already-accepted boss quest stays active
+			-- until the player levels past its range.
+			if v and Q.current and Q.current.boss then
+				Q.accepted = false
+				Q.key      = nil
 			end
 		end)
 	ui.toggleRow(farm, "Simple Kill Mode (no quests)",
