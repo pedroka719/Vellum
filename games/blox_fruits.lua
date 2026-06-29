@@ -337,10 +337,9 @@ function Module.start(lib)
 
 	-- ═══════════════════════════ TARGETING ═══════════════════════════
 	-- Score = inverse distance + level-fit. Closer + within range = higher.
-	-- Filter values are a *preference*, not a hard gate. If nothing matches
-	-- the name + level constraints, fall back to the closest alive enemy so
-	-- auto-farm never gets stuck silent. Stale filters from a prior Auto
-	-- Sea 1 quest tier were the worst offender here.
+	-- When autoFarmLevel sets farmTargetName (quest mode), ONLY return enemies
+	-- matching that name. Falling back to wrong enemies means kills don't count
+	-- toward the quest and the cycle stalls on the same tier forever.
 	local function pickEnemy()
 		local ch = LocalPlayer.Character
 		local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
@@ -371,7 +370,17 @@ function Module.start(lib)
 			end
 		end
 
-		return bestFiltered or bestAny
+		-- When autoFarmLevel set farmTargetName, ONLY return matching enemies.
+		-- Falling back to bestAny kills wrong mobs — quest kills never count,
+		-- and the quest cycle stalls forever on the same tier.
+		if cfg.farmTargetName ~= "" then
+			if not bestFiltered and bestAny then
+				warn("[Vellum BF] no '" .. cfg.farmTargetName .. "' in workspace.Enemies — " ..
+				      bestAny.Name .. " is nearest but quest needs " .. cfg.farmTargetName)
+			end
+			return bestFiltered
+		end
+		return bestAny
 	end
 
 	-- ═══════════════════════════ ISLAND MAP ═══════════════════════════
