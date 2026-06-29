@@ -1057,7 +1057,13 @@ function Module.start(lib)
 				end
 			end
 
-			applyQuestFilters(quest)
+			-- Only apply quest mob filters when the quest is actually accepted.
+			-- When StartQuest returned false success (Skylands), keep farmTargetName
+			-- as-is (already cleared by the no-target fallback) so the character
+			-- can freely kill whatever enemies exist instead of idling.
+			if Q.accepted then
+				applyQuestFilters(quest)
+			end
 			jwait(3.0)
 		end
 	end
