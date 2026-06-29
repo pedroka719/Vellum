@@ -436,6 +436,44 @@ function Module.start(lib)
 	-- sub-island. We tp to Prison.pos, find 0 alive Togas, then this
 	-- function returns the EnemySpawns centroid (-1900, 7, -2750) and the
 	-- caller snaps us into spawn range.
+	-- True if we're within radius studs of ANY live quest mob OR static
+	-- spawn anchor for the given mob. This is the "are we at the right
+	-- place to be farming" check — replaces the coarse atIsland(name)
+	-- which uses island.pos (Prison main is 8000+ studs from the
+	-- Colosseum spawn zone where Toga Warriors actually live).
+	local function nearQuestSpawn(mobName, hrp, radius)
+		if not mobName or not hrp then return false end
+		radius = radius or 600
+		local r2 = radius * radius
+		-- Live mobs (combat-state proximity)
+		local enemies = workspace:FindFirstChild("Enemies")
+		if enemies then
+			for _, e in ipairs(enemies:GetChildren()) do
+				if e.Name == mobName then
+					local eh = e:FindFirstChild("HumanoidRootPart")
+					local h  = e:FindFirstChild("Humanoid")
+					if eh and h and h.Health > 0 then
+						local dx, dy, dz = eh.Position.X - hrp.Position.X, eh.Position.Y - hrp.Position.Y, eh.Position.Z - hrp.Position.Z
+						if dx*dx + dy*dy + dz*dz < r2 then return true end
+					end
+				end
+			end
+		end
+		-- Static spawn anchors (between-respawn proximity)
+		local origin = workspace:FindFirstChild("_WorldOrigin")
+		local spawns = origin and origin:FindFirstChild("EnemySpawns")
+		if spawns then
+			local prefix = mobName .. " [Lv."
+			for _, p in ipairs(spawns:GetChildren()) do
+				if p:IsA("BasePart") and p.Name:sub(1, #prefix) == prefix then
+					local dx, dy, dz = p.Position.X - hrp.Position.X, p.Position.Y - hrp.Position.Y, p.Position.Z - hrp.Position.Z
+					if dx*dx + dy*dy + dz*dz < r2 then return true end
+				end
+			end
+		end
+		return false
+	end
+
 	local function discoverSubZone(mobName)
 		-- Pass A: live mobs (fast path — most common during steady-state farm)
 		local enemies = workspace:FindFirstChild("Enemies")
@@ -1078,21 +1116,26 @@ function Module.start(lib)
 			-- which prevented re-accepting the same quest. Re-accept of the
 			-- same row is exactly what we want to keep grinding XP.
 
-			-- TP to the quest's island if we aren't there yet.
-			-- Grace period: after arriving, skip the TP check for 60s so chasing
-			-- enemies beyond the atIsland radius doesn't loop us back.
-			local needsTP = not atIsland(quest.island)
+			-- TP only when we're far from BOTH the island AND any quest mob
+			-- spawn. atIsland alone is too coarse — Toga Warriors live in
+			-- the Colosseum (~8K studs from Prison.pos) but their quest
+			-- island is "Prison". Without the nearQuestSpawn check, the
+			-- loop yanked us back to Prison every 60s when grace expired,
+			-- even though we WERE farming Togas perfectly fine at their
+			-- actual spawn zone.
+			local ch = LocalPlayer.Character
+			local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+			local atZone = hrp and (atIsland(quest.island) or nearQuestSpawn(quest.mob, hrp, 800))
+			local needsTP = not atZone
 				and not (_islandGraceName == quest.island and tick() < _islandGraceUntil)
 			if needsTP then
 				tpToIsland(quest.island)
 				_islandGraceUntil = tick() + 60
 				_islandGraceName = quest.island
 				task.wait(0.8)
-				-- NOTE: do NOT clear Q.accepted here. Travelling to the quest
-				-- island doesn't invalidate the server-side quest acceptance.
-				-- Clearing it caused us to fire StartQuest a second time, which
-				-- the server treats as a fresh acceptance and resets the kill
-				-- counter to 0/N — wiping progress from the previous run.
+				-- NOTE: do NOT clear Q.accepted here. Travelling doesn't
+				-- invalidate server-side quest acceptance — clearing it
+				-- fires StartQuest twice and resets the server kill counter.
 				continue
 			end
 
@@ -1590,95 +1633,45 @@ function Module.start(lib)
 						-- iteration sees currentTarget is set and attacks.
 						return
 					end
-					-- No enemies alive anywhere on the map. Throttle scan:
-					-- waves respawn on a 5-10s timer, scanning faster just
-					-- allocates wasted GetChildren tables.
-					-- Generic fallback: if we've been searching >6s with active
-					-- quest, actively hunt the quest mob or move to island
-					-- center to trigger spawns. This works for ANY island and
-					-- ANY quest — no per-quest config needed.
+					-- No quest mob alive right now. Strict policy: STAY PUT
+					-- at the quest spawn and wait for respawns. BF respawns
+					-- mobs on a 5-10s wave timer; the server only spawns
+					-- them when a player is near the anchor — so as long
+					-- as we're sitting at the spawn zone, mobs WILL come.
+					--
+					-- The only reason to move is if we've actually drifted
+					-- away from the spawn (PvP knockback, fall, etc). In
+					-- that case, snap back. Never go hunting elsewhere —
+					-- the previous "fallback-hunt → fallback-tp to island"
+					-- behavior pulled us back to Prison every 6 seconds
+					-- when waves were briefly empty, undoing the Colosseum
+					-- sub-zone snap.
 					_noTargetTicks = (_noTargetTicks or 0) + 1
 					if _noTargetTicks > 4 and Q.current and Q.current.mob then
 						_noTargetTicks = 0
 						local mobName = Q.current.mob
 						local ch2 = LocalPlayer.Character
 						local hrp2 = ch2 and ch2:FindFirstChild("HumanoidRootPart")
-						if hrp2 then
-							-- Try to find the quest mob anywhere on the map
-							local bestMob, bestDist
-							for _, e in ipairs(workspace.Enemies:GetChildren()) do
-								if e.Name == mobName then
-									local ehrp = e:FindFirstChild("HumanoidRootPart")
-									local hum = e:FindFirstChild("Humanoid")
-									if ehrp and hum and hum.Health > 0 then
-										local d = (ehrp.Position - hrp2.Position).Magnitude
-										if not bestDist or d < bestDist then
-											bestMob, bestDist = ehrp, d
-										end
-									end
+						if hrp2 and not nearQuestSpawn(mobName, hrp2, 800) then
+							-- Drifted away. Snap back to the spawn centroid.
+							-- discoverSubZone returns the EnemySpawns anchor
+							-- when no live mobs exist (Pass B).
+							local sub = discoverSubZone(mobName)
+							if sub then
+								dbg("fallback-resync", mobName)
+								local dest = sub + Vector3.new(0, cfg.farmHeight, 0)
+								if _hoverBP and _hoverBP.Parent then
+									_hoverBP.P, _hoverBP.D = 0, 0
 								end
-							end
-							if _hoverBP and _hoverBP.Parent then
-								_hoverBP.P, _hoverBP.D = 0, 0
-							end
-							if bestMob then
-								dbg("fallback-hunt", mobName .. " dist=" .. math.floor(bestDist))
-								local dest = bestMob.Position + Vector3.new(0, cfg.farmHeight, 0)
 								_tweenHRPTo(hrp2, dest)
 								if _hoverBP and _hoverBP.Parent then
 									_hoverBP.P, _hoverBP.D = 600, 80
 									_hoverBP.Position = dest
 								end
-							else
-								-- No mobs of this type exist anywhere on the map.
-								-- If the quest isn't actually active (e.g. Skylands
-								-- StartQuest returned success-but-no-quest), widen
-								-- the target filter to accept ANY enemy so the script
-								-- farms what's available (generic spawns, other mobs)
-								-- rather than idling with nothing to kill.
-								if not Q.accepted then
-									dbg("fallback-widen", mobName .. " not found, quest not active — clearing filter")
-									cfg.farmTargetName = ""
-									cfg.farmLevelMin   = 1
-									cfg.farmLevelMax   = 9999
-								else
-									-- Quest IS active but mobs haven't respawned
-									-- yet. Try the EnemySpawns centroid first —
-									-- that's where mobs actually live. For Togas,
-									-- island.pos is Prison main (5K studs from
-									-- their spawn zone), so the fallback used to
-									-- yank us back to Prison every 6 seconds even
-									-- after we'd successfully snapped to the
-									-- Colosseum. discoverSubZone falls back to
-									-- _WorldOrigin.EnemySpawns when no live mobs
-									-- exist (Pass B), so this works generically.
-									local sub = discoverSubZone(mobName)
-									if sub then
-										dbg("fallback-subzone", mobName)
-										local dest = sub + Vector3.new(0, cfg.farmHeight, 0)
-										_tweenHRPTo(hrp2, dest)
-										if _hoverBP and _hoverBP.Parent then
-											_hoverBP.P, _hoverBP.D = 600, 80
-											_hoverBP.Position = dest
-										end
-									elseif not atIsland(Q.current.island) then
-										-- Last-resort: no live mobs, no spawn
-										-- anchors found. Tween to the island
-										-- center to nudge BF into spawning mobs.
-										local island = ISLAND_BY_NAME[Q.current.island]
-										if island then
-											dbg("fallback-tp", Q.current.island)
-											local dest = island.pos + Vector3.new(0, 10, 0)
-											_tweenHRPTo(hrp2, dest)
-											if _hoverBP and _hoverBP.Parent then
-												_hoverBP.P, _hoverBP.D = 600, 80
-												_hoverBP.Position = dest
-											end
-										end
-									end
-								end
 							end
 						end
+						-- nearQuestSpawn == true → just wait, server is
+						-- about to spawn the next wave. No movement.
 					end
 					jwait(1.5)
 					return
