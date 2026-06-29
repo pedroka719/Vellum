@@ -1194,8 +1194,16 @@ function Module.start(lib)
 				if not _hoverBP or not _hoverBP.Parent then return end
 				if not _hoverBG or not _hoverBG.Parent then return end
 
-				-- Maintain noclip: Roblox re-enables CanCollide every physics step
-				hrp2.CanCollide = false
+				-- Maintain noclip on every BasePart, not just HRP. Roblox
+				-- restores CanCollide each physics step, so a one-shot pass
+				-- only helps the HRP — arms/legs still catch on walls and
+				-- enemies, pinning us between geometry and the mob we're
+				-- trying to attack. Refresh the whole body each frame.
+				for _, p in ipairs(ch2:GetDescendants()) do
+					if p:IsA("BasePart") and p.CanCollide then
+						p.CanCollide = false
+					end
+				end
 
 				local enemy = (currentTarget and currentTarget.Parent) and currentTarget or nil
 
@@ -1422,17 +1430,29 @@ function Module.start(lib)
 	-- BF uses ToolTip property to classify weapon types: Melee, Sword, Gun, Blox Fruit.
 	-- The hotbar (1/2/3/4) maps to these types. cfg.selectedWeapon stores the ToolTip
 	-- value the user wants, and we find the first backpack tool with that ToolTip.
+	-- True for tools that can actually be equipped — has a Handle part
+	-- (or explicitly RequiresHandle=false) AND a non-empty ToolTip. BF
+	-- ships a no-handle empty "Tool" placeholder in the backpack that
+	-- silently breaks EquipTool when picked up as a fallback. The
+	-- ToolTip check also filters out non-weapon utility tools.
+	local function _isEquippableWeapon(t)
+		if not t:IsA("Tool") then return false end
+		if not t.ToolTip or t.ToolTip == "" then return false end
+		local hasHandle = t:FindFirstChild("Handle") ~= nil
+		if not hasHandle and t.RequiresHandle then return false end
+		return true
+	end
+
 	local function ensureWeaponEquipped()
 		local ch = LocalPlayer.Character
 		if not ch then return nil end
 		local hum = ch:FindFirstChildOfClass("Humanoid")
 		local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
-		if not hum then return nil end
+		if not hum or hum.Health <= 0 then return nil end  -- skip while dead
 
-		-- Check what's already in-hand
+		-- Already holding something equippable that matches the style? Done.
 		local held = ch:FindFirstChildOfClass("Tool")
-		if held then
-			-- Already holding something — only re-equip if it doesn't match the selected style
+		if held and _isEquippableWeapon(held) then
 			if cfg.selectedWeapon == "" or held.ToolTip == cfg.selectedWeapon then
 				return held
 			end
@@ -1440,10 +1460,10 @@ function Module.start(lib)
 
 		if not backpack then return nil end
 
-		-- Try to equip a tool matching the selected style (by ToolTip)
+		-- Style-specific match (e.g. "Melee", "Sword", "Gun", "Blox Fruit")
 		if cfg.selectedWeapon ~= "" then
 			for _, tool in ipairs(backpack:GetChildren()) do
-				if tool:IsA("Tool") and tool.ToolTip == cfg.selectedWeapon then
+				if _isEquippableWeapon(tool) and tool.ToolTip == cfg.selectedWeapon then
 					safe(function() hum:EquipTool(tool) end)
 					task.wait(0.15)
 					return ch:FindFirstChildOfClass("Tool")
@@ -1451,12 +1471,30 @@ function Module.start(lib)
 			end
 		end
 
-		-- Fallback: first tool in backpack
-		local tool = backpack:FindFirstChildOfClass("Tool")
-		if not tool then return nil end
-		safe(function() hum:EquipTool(tool) end)
-		task.wait(0.15)
-		return ch:FindFirstChildOfClass("Tool")
+		-- Fallback: first EQUIPPABLE tool. Was previously
+		-- FindFirstChildOfClass("Tool"), which returned BF's no-handle
+		-- placeholder and broke auto-farm with empty hands after every
+		-- respawn. Now we skip junk and prefer Melee > Sword > Gun > Fruit
+		-- so the script always lands on a real weapon.
+		local preference = { "Melee", "Sword", "Gun", "Blox Fruit" }
+		for _, want in ipairs(preference) do
+			for _, tool in ipairs(backpack:GetChildren()) do
+				if _isEquippableWeapon(tool) and tool.ToolTip == want then
+					safe(function() hum:EquipTool(tool) end)
+					task.wait(0.15)
+					return ch:FindFirstChildOfClass("Tool")
+				end
+			end
+		end
+		-- Last resort: any equippable tool (custom ToolTip we didn't predict).
+		for _, tool in ipairs(backpack:GetChildren()) do
+			if _isEquippableWeapon(tool) then
+				safe(function() hum:EquipTool(tool) end)
+				task.wait(0.15)
+				return ch:FindFirstChildOfClass("Tool")
+			end
+		end
+		return nil
 	end
 
 	-- Legacy alias used by autoFarmLoop
@@ -2203,6 +2241,76 @@ function Module.start(lib)
 	buildIslandESP()
 
 	-- ═══════════════════════════ KICK OFF ═══════════════════════════
+	-- ═══════════════════════════ RESPAWN RECOVERY ═══════════════════════════
+	-- When the character dies (PvP, mob damage, fall damage past Y limits)
+	-- BF rebuilds the character — new HRP, new Humanoid, new Backpack tool
+	-- references. Without this handler, currentTarget points to a destroyed
+	-- model, the hover BP is parented to nothing, and the auto-equip
+	-- fallback used to pick BF's no-Handle "Tool" placeholder. Result: we
+	-- stood empty-handed at spawn forever. Now:
+	--   1. Pause autoFarm via _tpInProgress while character loads.
+	--   2. Wait for Humanoid + Backpack to be ready.
+	--   3. Reset target + hover state so flight rebuilds on the new body.
+	--   4. Re-equip weapon (Melee > Sword > Gun > Fruit priority).
+	--   5. Hook the new Humanoid.Died so the next death triggers this again.
+	local function onCharacterReady(ch)
+		_tpInProgress = true                      -- pause auto-farm + flight
+		currentTarget   = nil
+		targetOriginalY = nil
+		lastHoldY       = nil
+
+		-- Destroy old flight bodies if they're orphaned (parented to old HRP).
+		safe(_stopFlightFn)
+		_hoverBP = nil
+		_hoverBG = nil
+
+		-- Wait for the character to actually be playable. CharacterReady is
+		-- BF's own "fully loaded" folder (children populate when ready); we
+		-- also wait on Humanoid.RootPart and Backpack-with-tool as belt &
+		-- suspenders for cases where the folder lags.
+		local hum = ch:WaitForChild("Humanoid", 8)
+		if not hum then _tpInProgress = false; return end
+		ch:WaitForChild("HumanoidRootPart", 8)
+
+		-- Backpack populates AFTER the character spawns. Spin briefly
+		-- waiting for at least one equippable weapon to land in it.
+		local deadline = tick() + 8
+		while tick() < deadline do
+			local bp = LocalPlayer:FindFirstChildOfClass("Backpack")
+			if bp then
+				for _, t in ipairs(bp:GetChildren()) do
+					if _isEquippableWeapon(t) then goto bp_ready end
+				end
+			end
+			task.wait(0.2)
+		end
+		::bp_ready::
+
+		_tpInProgress = false
+		safe(ensureWeaponEquipped)
+		safe(startFlight)
+
+		-- Hook this character's Died event so the next death re-runs us.
+		hum.Died:Connect(function()
+			_tpInProgress = true
+			currentTarget = nil
+			-- Toast so the user sees we noticed
+			Toast.show({
+				title = "Died",
+				body  = "Auto-farm paused — resuming after respawn.",
+				kind  = "warn", duration = 4,
+				key   = "died:" .. tostring(tick()),
+			})
+		end)
+	end
+
+	LocalPlayer.CharacterAdded:Connect(onCharacterReady)
+	-- Initial character: CharacterAdded won't fire for a character that
+	-- already exists when the script loads. Run it manually.
+	if LocalPlayer.Character then
+		task.spawn(function() onCharacterReady(LocalPlayer.Character) end)
+	end
+
 	task.spawn(autoFarmLoop)
 	task.spawn(autoFarmLevelLoop)
 	task.spawn(abilityRotationLoop)
