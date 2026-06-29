@@ -1073,15 +1073,16 @@ function Module.start(lib)
 				end
 			end
 
-			-- Skylands sub-zone navigation: after quest acceptance (which may
-			-- have moved us to the NPC), tween to the correct floating platform.
-			-- When the quest was accepted above we already did this; this section
-			-- handles the steady-state case where the quest is already accepted
-			-- and the player just needs to get to the right platform (e.g. after
-			-- respawn or grace expiry).
+			-- Skylands sub-zone navigation: tween to the correct floating platform
+			-- for the current quest target. This runs regardless of quest acceptance
+			-- status: when the quest was just accepted (above block), the character
+			-- was already moved to the right platform, so the distance gate below
+			-- (<25) skips the redundant tween. When the quest couldn't be accepted
+			-- (Skylands false-success), this ensures the character still returns to
+			-- the correct platform instead of staying stuck at the tower.
 			-- CRITICAL: zero BP forces during the tween so BodyPosition doesn't
 			-- fight TweenService (P=600 fights every CFrame write at 60 fps).
-			if quest.island == "Skylands" and Q.accepted then
+			if quest.island == "Skylands" then
 				local targetPos = SKY_SUB_ZONE[quest.mob]
 				if targetPos then
 					local ch = LocalPlayer.Character
