@@ -953,18 +953,27 @@ function Module.start(lib)
 
 			-- Skylands sub-zone navigation: after portal drop, respawn, or grace
 			-- expiry, tween to the correct floating platform for the quest mob.
+			-- CRITICAL: zero BP forces during the tween so BodyPosition doesn't
+			-- fight TweenService (P=600 fights every CFrame write at 60 fps).
 			if quest.island == "Skylands" then
 				local targetPos = SKY_SUB_ZONE[quest.mob]
 				if targetPos then
 					local ch = LocalPlayer.Character
 					local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
 					if hrp and (hrp.Position - targetPos).Magnitude > 25 then
+						if _hoverBP and _hoverBP.Parent then
+							_hoverBP.P, _hoverBP.D = 0, 0
+						end
 						local yDiff = math.abs(targetPos.Y - hrp.Position.Y)
 						if yDiff > Y_SNAP_THRESHOLD then
 							hrp.CFrame = CFrame.new(hrp.Position.X, targetPos.Y, hrp.Position.Z)
 							task.wait(0.5)
 						end
 						_tweenHRPTo(hrp, targetPos)
+						if _hoverBP and _hoverBP.Parent then
+							_hoverBP.P, _hoverBP.D = 600, 80
+							_hoverBP.Position = hrp.Position
+						end
 					end
 				end
 			end
@@ -1295,6 +1304,67 @@ function Module.start(lib)
 					-- No enemies alive anywhere on the map. Throttle scan:
 					-- waves respawn on a 5-10s timer, scanning faster just
 					-- allocates wasted GetChildren tables.
+					-- Generic fallback: if we've been searching >6s with active
+					-- quest, actively hunt the quest mob or move to island
+					-- center to trigger spawns. This works for ANY island and
+					-- ANY quest — no per-quest config needed.
+					_noTargetTicks = (_noTargetTicks or 0) + 1
+					if _noTargetTicks > 4 and Q.current and Q.current.mob then
+						_noTargetTicks = 0
+						local mobName = Q.current.mob
+						local ch2 = LocalPlayer.Character
+						local hrp2 = ch2 and ch2:FindFirstChild("HumanoidRootPart")
+						if hrp2 then
+							-- Try to find the quest mob anywhere on the map
+							local bestMob, bestDist
+							for _, e in ipairs(workspace.Enemies:GetChildren()) do
+								if e.Name == mobName then
+									local ehrp = e:FindFirstChild("HumanoidRootPart")
+									local hum = e:FindFirstChild("Humanoid")
+									if ehrp and hum and hum.Health > 0 then
+										local d = (ehrp.Position - hrp2.Position).Magnitude
+										if not bestDist or d < bestDist then
+											bestMob, bestDist = ehrp, d
+										end
+									end
+								end
+							end
+							if _hoverBP and _hoverBP.Parent then
+								_hoverBP.P, _hoverBP.D = 0, 0
+							end
+							if bestMob then
+								dbg("fallback-hunt", mobName .. " dist=" .. math.floor(bestDist))
+								local dest = bestMob.Position + Vector3.new(0, cfg.farmHeight, 0)
+								_tweenHRPTo(hrp2, dest)
+								if _hoverBP and _hoverBP.Parent then
+									_hoverBP.P, _hoverBP.D = 600, 80
+									_hoverBP.Position = dest
+								end
+							else
+								-- No mobs of this type exist anywhere on the map.
+								-- Tween toward island center to trigger spawns, but
+								-- only if we're NOT already at the island. This guard
+								-- prevents undoing Skylands sub-zone placement: after
+								-- the sub-zone nav put us on the correct platform,
+								-- atIsland returns true, so we don't tween back to the
+								-- tower (island.pos = Y 874). For other islands the
+								-- check also avoids pointless tweens when the issue
+								-- is a server respawn timer, not wrong position.
+								if not atIsland(Q.current.island) then
+									local island = ISLAND_BY_NAME[Q.current.island]
+									if island then
+										dbg("fallback-tp", Q.current.island)
+										local dest = island.pos + Vector3.new(0, 10, 0)
+										_tweenHRPTo(hrp2, dest)
+										if _hoverBP and _hoverBP.Parent then
+											_hoverBP.P, _hoverBP.D = 600, 80
+											_hoverBP.Position = dest
+										end
+									end
+								end
+							end
+						end
+					end
 					jwait(1.5)
 					return
 				end
