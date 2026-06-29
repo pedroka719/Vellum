@@ -371,6 +371,12 @@ function Module.start(lib)
 			end
 		end
 
+		-- When a specific target name is set (e.g. quest mob), never fall
+		-- back to a different enemy type. Attacking the wrong mob means
+		-- the quest kill counter never increments and the quest stalls.
+		if cfg.farmTargetName ~= "" then
+			return bestFiltered
+		end
 		return bestFiltered or bestAny
 	end
 
