@@ -1098,26 +1098,38 @@ function Module.start(lib)
 				end
 			end
 
-			-- Generic sub-zone snap: works on ANY island. If quest mobs are
-			-- alive in workspace.Enemies, take their spawn centroid and snap
-			-- there when we're far away (300+ studs). If no mobs alive yet
-			-- (quest just accepted, server hasn't spawned them), we stay near
-			-- the island NPC region — workspace.Enemies will populate within
-			-- 3-5 seconds and the next tick handles the snap.
-			--
-			-- Gate is loose (300 stud XZ / 80 Y) so combat drift doesn't
-			-- trigger re-snap each tick and cause oscillation. We only snap
-			-- when we're clearly on the wrong platform / wrong island corner.
-			local centroid = discoverSubZone(quest.mob)
-			if centroid then
-				local ch = LocalPlayer.Character
-				local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
-				if hrp then
-					local dx = hrp.Position.X - centroid.X
-					local dz = hrp.Position.Z - centroid.Z
-					local xzDist = math.sqrt(dx*dx + dz*dz)
-					local yDiff = math.abs(hrp.Position.Y - centroid.Y)
-					if xzDist > 300 or yDiff > 80 then
+			-- Generic sub-zone snap: gate by distance to the NEAREST alive
+			-- quest mob, not distance to the centroid. Centroid-gating broke
+			-- on wide zones like Prison's Dangerous Prisoner area (mobs
+			-- spread across 1000+ studs) — chasing the nearest mob put us
+			-- 400+ studs from centroid, snap fired, teleported us back,
+			-- pickEnemy reselected, infinite bumping cycle. Now: if there's
+			-- ANY quest mob within 400 studs of us, we're in the right zone
+			-- and don't snap. Only snap when we're stranded far from every
+			-- spawn (wrong island corner, freshly portal'd, etc).
+			local ch = LocalPlayer.Character
+			local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+			if hrp then
+				local enemies = workspace:FindFirstChild("Enemies")
+				local nearestDist = math.huge
+				if enemies then
+					for _, e in ipairs(enemies:GetChildren()) do
+						if e.Name == quest.mob then
+							local eh = e:FindFirstChild("HumanoidRootPart")
+							local h  = e:FindFirstChild("Humanoid")
+							if eh and h and h.Health > 0 then
+								local d = (eh.Position - hrp.Position).Magnitude
+								if d < nearestDist then nearestDist = d end
+							end
+						end
+					end
+				end
+				-- Snap to centroid only when we're > 400 studs from EVERY
+				-- alive quest mob. Centroid is calculated from the same scan
+				-- via discoverSubZone — only call it when we actually need it.
+				if nearestDist > 400 then
+					local centroid = discoverSubZone(quest.mob)
+					if centroid then
 						hoverEnabled = false
 						hrp.CFrame = CFrame.new(centroid + Vector3.new(0, 6, 0))
 						task.wait(0.4)
