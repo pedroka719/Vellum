@@ -956,7 +956,7 @@ function Module.start(lib)
 				if targetPos then
 					local ch = LocalPlayer.Character
 					local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
-					if hrp and (hrp.Position - targetPos).Magnitude > 100 then
+					if hrp and (hrp.Position - targetPos).Magnitude > 300 then
 						local yDiff = math.abs(targetPos.Y - hrp.Position.Y)
 						if yDiff > Y_SNAP_THRESHOLD then
 							hrp.CFrame = CFrame.new(hrp.Position.X, targetPos.Y, hrp.Position.Z)
