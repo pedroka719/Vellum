@@ -621,8 +621,10 @@ function Module.start(lib)
 		{ lvlMin = 120, lvlMax = 149, island = "Marine Fortress", questId = "MarineQuest2",  tier = 1, mob = "Chief Petty Officer", taskCount = 8 },
 		{ lvlMin = 150, lvlMax = 174, island = "Skylands",        questId = "SkyQuest",      tier = 1, mob = "Sky Bandit",      taskCount = 7 },
 		{ lvlMin = 175, lvlMax = 189, island = "Skylands",        questId = "SkyQuest",      tier = 2, mob = "Dark Master",     taskCount = 8 },
-		{ lvlMin = 190, lvlMax = 219, island = "Skylands",        questId = "PrisonerQuest", tier = 1, mob = "Prisoner",        taskCount = 8 },
-		{ lvlMin = 220, lvlMax = 249, island = "Skylands",        questId = "ImpelQuest",    tier = 1, mob = "Warden",          taskCount = 1 },
+		{ lvlMin = 190, lvlMax = 209, island = "Prison",          questId = "PrisonerQuest", tier = 1, mob = "Prisoner",          taskCount = 8 },
+		{ lvlMin = 210, lvlMax = 219, island = "Prison",          questId = "PrisonerQuest", tier = 2, mob = "Dangerous Prisoner", taskCount = 8 },
+		{ lvlMin = 220, lvlMax = 229, island = "Prison",          questId = "ImpelQuest",    tier = 1, mob = "Warden",            taskCount = 1 },
+		{ lvlMin = 230, lvlMax = 249, island = "Prison",          questId = "ImpelQuest",    tier = 2, mob = "Chief Warden",      taskCount = 1 },
 		{ lvlMin = 250, lvlMax = 274, island = "Prison",          questId = "ColosseumQuest",tier = 1, mob = "Toga Warrior",    taskCount = 7 },
 		{ lvlMin = 275, lvlMax = 324, island = "Prison",          questId = "ColosseumQuest",tier = 2, mob = "Gladiator",       taskCount = 8 },
 		{ lvlMin = 325, lvlMax = 374, island = "Magma Village",   questId = "MagmaQuest",    tier = 1, mob = "Military Soldier",taskCount = 7 },
@@ -956,7 +958,7 @@ function Module.start(lib)
 				if targetPos then
 					local ch = LocalPlayer.Character
 					local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
-					if hrp and (hrp.Position - targetPos).Magnitude > 300 then
+					if hrp and (hrp.Position - targetPos).Magnitude > 25 then
 						local yDiff = math.abs(targetPos.Y - hrp.Position.Y)
 						if yDiff > Y_SNAP_THRESHOLD then
 							hrp.CFrame = CFrame.new(hrp.Position.X, targetPos.Y, hrp.Position.Z)
