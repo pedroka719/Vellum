@@ -341,6 +341,8 @@ function Module.start(lib)
 	-- the name + level constraints, fall back to the closest alive enemy so
 	-- auto-farm never gets stuck silent. Stale filters from a prior Auto
 	-- Sea 1 quest tier were the worst offender here.
+	local _scanStuckCount = 0  -- ticks without finding quest mob
+
 	local function pickEnemy()
 		local ch = LocalPlayer.Character
 		local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
@@ -371,11 +373,19 @@ function Module.start(lib)
 			end
 		end
 
-		-- When a specific target name is set (e.g. quest mob), never fall
-		-- back to a different enemy type. Attacking the wrong mob means
-		-- the quest kill counter never increments and the quest stalls.
+		-- When a quest mob target is set, prefer those enemies 100%.
+		-- But if we scan for ~18s without finding one (e.g. wrong spawn
+		-- area), any enemy is better than stalling — keeps XP flowing.
 		if cfg.farmTargetName ~= "" then
-			return bestFiltered
+			if bestFiltered then
+				_scanStuckCount = 0
+				return bestFiltered
+			end
+			_scanStuckCount = _scanStuckCount + 1
+			if _scanStuckCount < 12 then  -- ~18s at 1.5s/scan
+				return nil
+			end
+			dbg("pick-stuck", "quest mob '" .. cfg.farmTargetName .. "' not seen in " .. _scanStuckCount .. " scans, falling back")
 		end
 		return bestFiltered or bestAny
 	end
@@ -956,7 +966,20 @@ function Module.start(lib)
 			end
 		end
 
-		-- Fallback: first tool in backpack
+		-- Fallback: try weapon types in priority order, then first tool
+		local STYLE_PRIORITY = { "Melee", "Sword", "Gun", "Blox Fruit" }
+		for _, style in ipairs(STYLE_PRIORITY) do
+			for _, child in ipairs(backpack:GetChildren()) do
+				if child:IsA("Tool") and child.ToolTip == style then
+					safe(function() hum:EquipTool(child) end)
+					task.wait(0.15)
+					local equipped = ch:FindFirstChildOfClass("Tool")
+					if equipped then return equipped end
+					break
+				end
+			end
+		end
+		-- Absolute fallback: any tool
 		local tool = backpack:FindFirstChildOfClass("Tool")
 		if not tool then return nil end
 		safe(function() hum:EquipTool(tool) end)
