@@ -1007,31 +1007,41 @@ function Module.start(lib)
 				end
 			end
 
-			-- Skylands sub-zone navigation: tween to the correct floating platform
-			-- for the current quest target. Always runs (not gated on Q.accepted)
+			-- Skylands sub-zone navigation: move to the correct floating platform
+			-- for the current quest target. Uses BodyPosition physics (same as
+			-- combat movement) instead of TweenService/CFrame which BF anti-cheat
+			-- blocks for large Y movement. Always runs (not gated on Q.accepted)
 			-- so the character returns to the right platform even when quest
-			-- acceptance fails. The distance gate (<25) prevents redundant tweens.
+			-- fails. The distance gate (<25) prevents redundant movement.
 			if quest.island == "Skylands" then
 				local targetPos = SKY_SUB_ZONE[quest.mob]
 				if targetPos then
 					local ch = LocalPlayer.Character
 					local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
 					if hrp and (hrp.Position - targetPos).Magnitude > 25 then
+						-- Temporarily pause hover Heartbeat so it doesn't overwrite
+						-- our BP target (heartbeat sets BP to maintain current Y).
+						-- BodyPosition physics + gravity handles descent naturally.
+						hoverEnabled = false
 						if _hoverBP and _hoverBP.Parent then
-							_hoverBP.P, _hoverBP.D = 0, 0
+							_hoverBP.P = 600
+							_hoverBP.D = 80
+							_hoverBP.Position = targetPos
 						end
-						if targetPos.Y < hrp.Position.Y then
-							local yDiff = hrp.Position.Y - targetPos.Y
-							if yDiff > Y_SNAP_THRESHOLD then
-								hrp.CFrame = CFrame.new(hrp.Position.X, targetPos.Y, hrp.Position.Z)
-								task.wait(0.5)
+						if _hoverBG and _hoverBG.Parent then
+							_hoverBG.CFrame = CFrame.new(hrp.Position, hrp.Position - Vector3.new(0, 0, 1))
+						end
+						-- Wait for physics to move us, maintaining noclip
+						for _ = 1, 40 do
+							task.wait(0.2)
+							if not hrp.Parent then break end
+							hrp.CanCollide = false
+							if (hrp.Position - targetPos).Magnitude < 25 then break end
+							if _hoverBP and _hoverBP.Parent then
+								_hoverBP.Position = targetPos
 							end
 						end
-						_tweenHRPTo(hrp, targetPos)
-						if _hoverBP and _hoverBP.Parent then
-							_hoverBP.P, _hoverBP.D = 600, 80
-							_hoverBP.Position = hrp.Position
-						end
+						hoverEnabled = true
 					end
 				end
 			end
