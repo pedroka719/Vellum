@@ -1159,6 +1159,128 @@ function Module.start(lib)
 		for key in pairs(t) do if not seen[key] then _espDetachEntry("bosses", key) end end
 	end
 
+	-- ─── DEVIL FRUIT ESP ───
+	-- Dropped fruits live in workspace.Characters as models named
+	-- "bloxfruit<spawnerID>". The actual fruit ID is on the inner Tool
+	-- (e.g. "Mera-Mera" or "Buddha-Buddha"). We display the fruit ID
+	-- so the user can hunt the specific one they want. Pink accent.
+	local function _fruitName(model)
+		-- Look for the Tool inside the model; its Name is the fruit ID.
+		for _, c in ipairs(model:GetChildren()) do
+			if c:IsA("Tool") and c.Name:find("-") then
+				-- "Mera-Mera" → "Mera Mera" (more readable)
+				return (c.Name:gsub("-", " "))
+			end
+		end
+		-- Fallback: attribute lookup (BF may stash it as an attr on the model)
+		local attr = model:GetAttribute("FruitName") or model:GetAttribute("Fruit")
+		if attr and tostring(attr) ~= "" then return tostring(attr) end
+		return "Devil Fruit"
+	end
+
+	local function scanFruitESP()
+		local t = _espGet("fruits")
+		if not cfg.espFruits then _espDetachAll("fruits"); return end
+		local container = workspace:FindFirstChild("Characters")
+		if not container then return end
+		local PINK = Color3.fromRGB(255, 130, 230)
+		local seen = {}
+		for _, c in ipairs(container:GetChildren()) do
+			if c.Name:sub(1, 9):lower() == "bloxfruit" then
+				local part = c:FindFirstChild("Handle") or c:FindFirstChildWhichIsA("BasePart")
+				if part then
+					local dist = _distFromMe(part) or 0
+					if cfg.espMaxDist > 0 and dist > cfg.espMaxDist then
+						_espDetachEntry("fruits", c)
+					else
+						seen[c] = true
+						local entry = t[c]
+						if not entry then
+							local cardH, cardP = ESP.card({
+								adornee = part, accent = PINK, group = "fruits",
+								title = _fruitName(c),
+								caption = string.format("%d studs", dist),
+							})
+							local hlH = ESP.highlight({
+								adornee = c, color = PINK,
+								fillTransparency = 0.65, outlineTransparency = 0.0,
+								group = "fruits",
+							})
+							t[c] = { cardHandle = cardH, hlHandle = hlH, card = cardP }
+						else
+							entry.card.setLines(nil, nil, string.format("%d studs", dist))
+						end
+					end
+				end
+			end
+		end
+		for key in pairs(t) do if not seen[key] then _espDetachEntry("fruits", key) end end
+	end
+
+	-- ─── TRACERS ───
+	-- Drawing.Line from screen-center to each ESP target. Color matches
+	-- the target's group: red player, amber boss, green quest mob, pink
+	-- fruit, cyan chest. Auto-hides for offscreen targets. Per-frame
+	-- update via Heartbeat — Drawing API is GPU-accelerated, cheap.
+	local _tracers = {} -- adornee -> Drawing.Line
+	local _tracerConn
+
+	local function _tracerColor(group)
+		if group == "players"  then return Color3.fromRGB(255,  90,  90) end
+		if group == "bosses"   then return Color3.fromRGB(255, 170,  60) end
+		if group == "questmob" then return Color3.fromRGB(120, 255, 140) end
+		if group == "fruits"   then return Color3.fromRGB(255, 130, 230) end
+		if group == "chests"   then return Color3.fromRGB(120, 230, 255) end
+		return Color3.fromRGB(220, 220, 220)
+	end
+
+	local function _detachAllTracers()
+		for k, line in pairs(_tracers) do
+			pcall(function() line.Visible = false; line:Remove() end)
+			_tracers[k] = nil
+		end
+	end
+
+	local function _tracerFrame()
+		if not cfg.espTracers then _detachAllTracers(); return end
+		if type(Drawing) ~= "table" or type(Drawing.new) ~= "function" then return end
+		local camera = workspace.CurrentCamera
+		if not camera then return end
+		local viewSize = camera.ViewportSize
+		local origin = Vector2.new(viewSize.X * 0.5, viewSize.Y)
+		local seen = {}
+
+		-- Walk every active ESP tracker group that has a worldspace adornee
+		for groupName, members in pairs(_espTrackers) do
+			for key, entry in pairs(members) do
+				local card = entry.card and entry.card.instance
+				local adornee = card and card.Adornee
+				if adornee and adornee:IsA("BasePart") then
+					local screen, onScreen = camera:WorldToViewportPoint(adornee.Position)
+					if onScreen then
+						seen[adornee] = true
+						local line = _tracers[adornee]
+						if not line then
+							line = Drawing.new("Line")
+							line.Thickness = 1.5
+							line.Transparency = 0.85
+							_tracers[adornee] = line
+						end
+						line.From = origin
+						line.To = Vector2.new(screen.X, screen.Y)
+						line.Color = _tracerColor(groupName)
+						line.Visible = true
+					end
+				end
+			end
+		end
+
+		-- Hide tracers for adornees that aren't tracked this frame
+		for key, line in pairs(_tracers) do
+			if not seen[key] then line.Visible = false end
+		end
+	end
+
 	-- ─── QUEST MOB ESP ───
 	-- Pure highlight, no card — would clutter combat. Bright green outline
 	-- on every alive instance of Q.current.mob.
@@ -1197,10 +1319,17 @@ function Module.start(lib)
 			safe(scanPlayerESP)
 			safe(scanChestESP)
 			safe(scanBossESP)
+			safe(scanFruitESP)
 			safe(scanQuestMobESP)
 			task.wait(1.0)
 		end
 	end
+
+	-- Tracers run per-frame (Heartbeat) because lines need to track the
+	-- camera, not the once-a-second scan tick. _tracerFrame internally
+	-- short-circuits when cfg.espTracers is off and the Drawing API is
+	-- missing — connecting once at module init is safe.
+	RunService.Heartbeat:Connect(function() safe(_tracerFrame) end)
 
 	-- ═══════════════════════════ LOOPS ═══════════════════════════
 
