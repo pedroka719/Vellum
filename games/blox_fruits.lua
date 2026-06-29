@@ -1201,25 +1201,44 @@ function Module.start(lib)
 					if centroid then
 						local dest = centroid + Vector3.new(0, 6, 0)
 						local snapDist = (dest - hrp.Position).Magnitude
-						hoverEnabled = false
-						-- Short snap (under 1000 studs) → direct CFrame is
-						-- fine, BF accepts it for in-island sub-zone moves.
-						-- Long snap (>= 1000 studs) → use the segmented
-						-- tween from tpToIsland, which BF anti-cheat
-						-- tolerates up to 60K studs (verified live). This
-						-- handles cases like Toga Warriors, whose spawn
-						-- anchors are in the Colosseum sub-island ~8K
-						-- studs from the Prison "island.pos" we tp'd to.
 						if snapDist < 1000 then
+							-- Short snap → direct CFrame. BP just gets its
+							-- target updated on the new HRP position so it
+							-- doesn't yank us back to the old enemy.
+							hoverEnabled = false
 							hrp.CFrame = CFrame.new(dest)
+							task.wait(0.4)
+							if _hoverBP and _hoverBP.Parent then
+								_hoverBP.Position = hrp.Position
+							end
+							hoverEnabled = true
 						else
+							-- Long snap → tear down flight first, otherwise
+							-- the BP (MaxForce=inf, Position=old enemy) fights
+							-- the tween every frame and BF's anti-cheat
+							-- rejects the resulting jitter (rollback to
+							-- mid-sea). Same pattern tpToIsland uses for
+							-- cross-island moves. Skip the island re-TP
+							-- check while we're snapping by setting
+							-- _tpInProgress so autoFarmLoop doesn't fight us.
+							_tpInProgress = true
+							local restoreAuto   = cfg.autoFarm
+							local restoreAutoFL = cfg.autoFarmLevel
+							cfg.autoFarm = false
+							cfg.autoFarmLevel = false
+							safe(_stopFlightFn)
 							safe(function() _tweenHRPTo(hrp, dest) end)
+							-- Refresh grace so the next autoFarmLevelLoop
+							-- tick doesn't immediately re-TP us back to
+							-- island.pos (which would defeat the whole
+							-- point of snapping into the sub-zone).
+							_islandGraceUntil = tick() + 60
+							_islandGraceName  = quest.island
+							cfg.autoFarm = restoreAuto
+							cfg.autoFarmLevel = restoreAutoFL
+							_tpInProgress = false
+							safe(startFlight)
 						end
-						task.wait(0.4)
-						if _hoverBP and _hoverBP.Parent then
-							_hoverBP.Position = hrp.Position
-						end
-						hoverEnabled = true
 					end
 				end
 			end
