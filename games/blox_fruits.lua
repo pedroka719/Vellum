@@ -1194,16 +1194,14 @@ function Module.start(lib)
 				if not _hoverBP or not _hoverBP.Parent then return end
 				if not _hoverBG or not _hoverBG.Parent then return end
 
-				-- Maintain noclip on every BasePart, not just HRP. Roblox
-				-- restores CanCollide each physics step, so a one-shot pass
-				-- only helps the HRP — arms/legs still catch on walls and
-				-- enemies, pinning us between geometry and the mob we're
-				-- trying to attack. Refresh the whole body each frame.
-				for _, p in ipairs(ch2:GetDescendants()) do
-					if p:IsA("BasePart") and p.CanCollide then
-						p.CanCollide = false
-					end
-				end
+				-- Maintain noclip: Roblox re-enables CanCollide every physics
+				-- step. We refresh HRP only — full-body refresh caused the
+				-- character to slide freely between mobs (no contact at all),
+				-- which made pickEnemy's "closest" target flip every tick
+				-- and the auto-farm to bounce between enemies forever. Body
+				-- parts get a one-shot noclip in startFlight, which re-runs
+				-- on every respawn via onCharacterReady.
+				hrp2.CanCollide = false
 
 				local enemy = (currentTarget and currentTarget.Parent) and currentTarget or nil
 
