@@ -2699,6 +2699,14 @@ function Module.start(lib)
 	-- flight teardown + restore pattern under the hood.
 	local shopTab = ui.newPage("shop")
 
+	-- Master cancel — stops every active auto-unlock at once. Farm
+	-- settings (level range, target name, selected weapon) stay as
+	-- the unlock left them — cancellation is intentionally minimal
+	-- so the user can also tweak settings manually after canceling.
+	ui.actionBtn(shopTab, "■ Cancel ALL active auto-unlocks", function()
+		cancelAllUnlocks()
+	end)
+
 	-- Fruit Dealer — live rotation panel + per-fruit snipe checkboxes.
 	-- Curated to the ~14 most-wanted fruits (Rarity 3+ + a few high-value
 	-- Rarity 2). Full 41-fruit list would bloat the tab.
@@ -2793,8 +2801,8 @@ function Module.start(lib)
 	}
 
 	-- Polling task that retries BuyItem every 30s until success OR the user
-	-- toggles auto-farm off. Each unlock spawns at most one of these so
-	-- back-to-back unlock clicks don't stack pollers.
+	-- toggles the unlock off. _unlockPollers[item] is checked each iteration —
+	-- setting it to nil cancels the poller within ~30s (one wait cycle).
 	local _unlockPollers = {}
 	local function _pollUntilBought(item, displayName)
 		if _unlockPollers[item] then return end
@@ -2803,6 +2811,7 @@ function Module.start(lib)
 			local deadline = tick() + 3600  -- 1hr max
 			while tick() < deadline and _running do
 				task.wait(30)
+				if not _unlockPollers[item] then break end  -- cancelled
 				if not cfg.autoFarm and not cfg.autoFarmLevel then break end
 				local ok, res = pcall(function()
 					return R.CommF_:InvokeServer("BuyItem", item)
@@ -2819,6 +2828,36 @@ function Module.start(lib)
 			end
 			_unlockPollers[item] = nil
 		end)
+	end
+
+	local function isUnlockActive(item)
+		return _unlockPollers[item] == true
+	end
+
+	local function cancelUnlock(item, displayName)
+		if _unlockPollers[item] then
+			_unlockPollers[item] = nil
+			Toast.show({
+				title = "Unlock cancelled",
+				body  = (displayName or item) .. " — farm settings unchanged",
+				kind  = "warn", duration = 4,
+				key   = "unlock:cancel:" .. item,
+			})
+		end
+	end
+
+	local function cancelAllUnlocks()
+		local n = 0
+		for k in pairs(_unlockPollers) do
+			_unlockPollers[k] = nil
+			n = n + 1
+		end
+		Toast.show({
+			title = "All unlocks cancelled",
+			body  = n == 0 and "Nothing was running" or (tostring(n) .. " unlock(s) stopped"),
+			kind  = "warn", duration = 4,
+			key   = "unlock:cancelall",
+		})
 	end
 
 	-- Auto-unlock router. Branches on prereq.kind and dispatches to the
@@ -2976,8 +3015,8 @@ function Module.start(lib)
 	end
 
 	-- Render a shop section. Items split into BUY (no prereq) and LOCKED
-	-- (gated). Each LOCKED row shows the gate inline and an Unlock button
-	-- instead of Buy.
+	-- (gated). Each LOCKED row shows the gate inline + a toggle that
+	-- starts the auto-unlock when ON and cancels it when OFF.
 	local function renderShopSection(parent, title, verb, items)
 		ui.sectionLabel(parent, title)
 		local locked = {}
@@ -2998,9 +3037,16 @@ function Module.start(lib)
 					-- If we're already past the gate, this succeeds.
 					tryShopBuy(e.npc, e.item, e.item, e.prereq)
 				end)
-				ui.actionBtn(parent, "      ▶ Auto-unlock " .. e.item, function()
-					startUnlock(e.item, e.item, e.prereq)
-				end)
+				-- Toggle: ON = unlock running, OFF = idle/cancelled. The
+				-- ui.toggleRow polls the getF every UI refresh tick so the
+				-- toggle visually flips to OFF on its own when the unlock
+				-- finishes (poller success → _unlockPollers[item] = nil).
+				ui.toggleRow(parent, "      Auto-unlock " .. e.item,
+					function() return isUnlockActive(e.item) end,
+					function(v)
+						if v then startUnlock(e.item, e.item, e.prereq)
+						else      cancelUnlock(e.item, e.item) end
+					end)
 			end
 		end
 	end
@@ -3049,9 +3095,12 @@ function Module.start(lib)
 		tryShopBuy("AbilityTeacher", "Buso", "Buso Haki",
 			{kind="level", value=300, hint="Lv 300 + 5M Beli"})
 	end)
-	ui.actionBtn(shopTab, "      ▶ Auto-unlock Buso Haki", function()
-		startUnlock("Buso", "Buso Haki", {kind="level", value=300, hint="Lv 300"})
-	end)
+	ui.toggleRow(shopTab, "      Auto-unlock Buso Haki",
+		function() return isUnlockActive("Buso") end,
+		function(v)
+			if v then startUnlock("Buso", "Buso Haki", {kind="level", value=300, hint="Lv 300"})
+			else      cancelUnlock("Buso", "Buso Haki") end
+		end)
 
 	renderShopSection(shopTab, "BOATS", "Buy", {
 		{ item = "Rowboat",      npc = "BoatDealer"        },
