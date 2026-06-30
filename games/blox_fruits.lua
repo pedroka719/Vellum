@@ -83,8 +83,6 @@ function Module.start(lib)
 		-- ability rotation
 		abilitySlots = { Z = false, X = false, C = false, V = false, F = false },
 		abilityCadence = 2.0,        -- sec between ability activations
-		abilityAim     = false,      -- aim mouse at target before each press
-		                             -- (turns directional abilities into aimbot)
 
 		-- fruit sniper — auto-tween to dropped devil fruits and let
 		-- natural collision pickup grab them. Pure passive collection,
@@ -2135,42 +2133,6 @@ function Module.start(lib)
 		F = Enum.KeyCode.F,
 	}
 
-	-- ─── ABILITY AIMBOT ───
-	-- Strict: only aim at the auto-farm's currentTarget. The previous
-	-- 'nearest monster / nearest player' fallback caused the character
-	-- to fly off-spawn — BF abilities like Z dashes use Mouse.Hit for
-	-- direction, so aiming at a random nearby mob made the dash teleport
-	-- us to that mob's location, pulling us away from the quest spawn.
-	-- Then no targets in range → auto-farm hovered uselessly.
-	--
-	-- For PvP / boss hunts the user can manually pick a target — once
-	-- the auto-farm picks them up, currentTarget reflects that and the
-	-- aimbot follows.
-	local function _findAimTarget()
-		if not currentTarget or not currentTarget.Parent then return nil end
-		local th = currentTarget:FindFirstChild("HumanoidRootPart")
-		local hum = currentTarget:FindFirstChild("Humanoid")
-		if th and hum and hum.Health > 0 then return th end
-		return nil
-	end
-
-	-- Move the OS mouse to the target's screen pixel. No camera snap —
-	-- the previous version tried to face offscreen targets by writing
-	-- Camera.CFrame, which rotated the character (BF locks character
-	-- orientation to camera) and fought the hover BodyGyro. Now: if
-	-- the target is offscreen, skip the aim. Ability still fires
-	-- (the keypress goes through) but uses whatever Mouse.Hit happens
-	-- to be at — usually fine because Z is often a buff/short range
-	-- and X/C/V are camera-relative.
-	local function _aimMouseAt(part)
-		if not part then return end
-		local cam = workspace.CurrentCamera
-		if not cam then return end
-		local screen, onScreen = cam:WorldToViewportPoint(part.Position)
-		if not onScreen then return end  -- skip rather than camera-snap
-		VIM:SendMouseMoveEvent(screen.X, screen.Y, game)
-	end
-
 	local function abilityRotationTick()
 		-- Previously gated on cfg.autoFarm — that meant abilities could
 		-- only fire while the auto-farm was on, which is exactly when the
@@ -2229,16 +2191,6 @@ function Module.start(lib)
 			end
 		end
 
-		-- Aimbot: if enabled, find the best target and point the mouse
-		-- at it ONCE before the keypress burst. Cheaper than re-aiming
-		-- per slot since all slots in this tick share the same cadence
-		-- and BF reads Mouse.Hit at the moment of FireServer.
-		local aimPart
-		if cfg.abilityAim then
-			aimPart = _findAimTarget()
-			if aimPart then _aimMouseAt(aimPart) end
-		end
-
 		-- Press each enabled key via VirtualInputManager. BF's local
 		-- input listener fires the right ability remote with the right
 		-- hash + args. Faster, more reliable, and one ability path that
@@ -2246,12 +2198,6 @@ function Module.start(lib)
 		for _, slot in ipairs(canFire) do
 			safe(function()
 				local key = SLOT_KEYS[slot]
-				-- Re-aim per slot too — abilities at the end of the burst
-				-- may have a different target if the previous one killed
-				-- a mob and pickEnemy switched currentTarget mid-tick.
-				if cfg.abilityAim and aimPart and aimPart.Parent then
-					_aimMouseAt(aimPart)
-				end
 				VIM:SendKeyEvent(true,  key, false, game)
 				task.wait(0.05)
 				VIM:SendKeyEvent(false, key, false, game)
@@ -2658,9 +2604,6 @@ function Module.start(lib)
 	ui.toggleRow(farm, "F",
 		function() return cfg.abilitySlots.F end,
 		function(v) cfg.abilitySlots.F = v end)
-	ui.toggleRow(farm, "Aimbot (point mouse at target before each ability)",
-		function() return cfg.abilityAim end,
-		function(v) cfg.abilityAim = v end)
 	ui.sliderRow(farm, "Ability cadence (sec)",
 		function() return cfg.abilityCadence end,
 		function(v) cfg.abilityCadence = v end,
