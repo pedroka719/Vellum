@@ -360,6 +360,12 @@ function Module.start(lib)
 	-- PlayerScripts.CombatFramework). The hash is the only gate.
 
 	-- ═══════════════════════════ TARGETING ═══════════════════════════
+	-- Logia immunity: tracked behaviorally because BF doesn't expose the
+	-- player's Buso ownership client-side. Starts unknown — flips false
+	-- on first 'Enemy is immune to physical attacks' notification, flips
+	-- true if we ever observe HP damage on a Logia enemy.
+	local _hasBuso = nil  -- nil = unknown, false = confirmed missing, true = confirmed have
+
 	-- Score = inverse distance + level-fit. Closer + within range = higher.
 	-- When autoFarmLevel sets farmTargetName (quest mode), ONLY return enemies
 	-- matching that name. Falling back to wrong enemies means kills don't count
@@ -376,6 +382,17 @@ function Module.start(lib)
 			local ehrp = e:FindFirstChild("HumanoidRootPart")
 			local hum  = e:FindFirstChild("Humanoid")
 			if ehrp and hum and hum.Health > 0 then
+				-- Logia guard: Logia-fruit enemies are physically immune
+				-- without Buso Haki. If we've confirmed we lack Buso (via
+				-- the notification scanner), skip them — attacking just
+				-- wastes attack ticks and risks suicide on bosses. Bypass
+				-- when _hasBuso is nil (unknown) so the first attempt
+				-- can produce the notification we use to detect.
+				local fruitType = e:GetAttribute("FruitType")
+				local busoNeeded = e:GetAttribute("BusoEnabled")
+				if fruitType == "Logia" and busoNeeded and _hasBuso == false then
+					-- skip — can't damage this enemy
+				else
 				local d = (ehrp.Position - hrp.Position).Magnitude
 				local score = 1000 - d  -- closer = higher
 
@@ -390,6 +407,7 @@ function Module.start(lib)
 					if not bestFilteredScore or score > bestFilteredScore then
 						bestFiltered, bestFilteredScore = e, score
 					end
+				end
 				end
 			end
 		end
@@ -1508,6 +1526,41 @@ function Module.start(lib)
 		end)
 	end
 
+	-- ═══════════════════════════ IMMUNITY DETECTOR ═══════════════════════════
+	-- BF hides Buso ownership from the client — no Data.Buso, no attribute,
+	-- no remote that returns it. The only reliable signal is the in-game
+	-- notification BF pops when we try to physically attack a Logia user
+	-- without Buso: 'Enemy is immune to physical attacks!'. We hook the
+	-- notification folder for that string, flip _hasBuso=false, drop the
+	-- current target, and let pickEnemy's Logia guard route us elsewhere.
+	--
+	-- Conversely: if we ever observe HP damage on a Logia target, we flip
+	-- _hasBuso=true (proven we can hurt them). Done in attackOnce's kill
+	-- detection — wired separately.
+	local notifFolder = LocalPlayer:WaitForChild("PlayerGui"):FindFirstChild("Notifications")
+	if notifFolder then
+		notifFolder.ChildAdded:Connect(function(template)
+			-- Text may be set after the child is parented — small wait
+			task.wait(0.05)
+			if not template or not template:IsA("TextLabel") then return end
+			local text = (template.Text or ""):lower()
+			if text:find("immune to physical") or (text:find("aura") and text:find("purchase")) then
+				_hasBuso = false
+				if currentTarget then
+					-- Drop the Logia target we were attacking; pickEnemy
+					-- will route us to a non-Logia or wait at the spawn.
+					currentTarget = nil
+				end
+				Toast.show({
+					title = "Buso required",
+					body  = "Skipping physical-immune enemies. Unlock Aura/Buso Haki on the Shop tab.",
+					kind  = "warn", duration = 6,
+					key   = "immune:warn",  -- toast key dedupes, fires once
+				})
+			end
+		end)
+	end
+
 	-- ═══════════════════════════ SHOP ═══════════════════════════
 	-- Canonical NPC positions from ReplicatedStorage.NPCs.<name>.FloorPos
 	-- (the attribute BF uses to position NPCs after the world loads).
@@ -2355,6 +2408,11 @@ function Module.start(lib)
 					stats.sessionKills = stats.sessionKills + 1
 					dbg("kill", enemy.Name)
 					recordQuestKill(enemy.Name)
+					-- If we just killed a Logia enemy, we have Buso — flip
+					-- the flag so the Logia guard stops skipping them.
+					if enemy and enemy:GetAttribute("FruitType") == "Logia" then
+						_hasBuso = true
+					end
 					currentTarget = nil
 					targetOriginalY = nil
 				end
