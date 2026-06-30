@@ -2686,68 +2686,147 @@ function Module.start(lib)
 	-- assigned dealer. Pulled from BF wiki + WeaponData. Buy fires
 	-- BuyItem with the in-game name (case-sensitive). Returns code 1
 	-- if already owned, 0 on fresh purchase, 2 on failure.
-	ui.sectionLabel(shopTab, "SWORDS")
-	for _, w in ipairs({
-		{ "Cutlass",        "SwordDealer"    },
-		{ "Katana",         "SwordDealer"    },
-		{ "Iron Mace",      "SwordDealer"    },
-		{ "Dual Katana",    "SwordDealerWest"},
-		{ "Triple Katana",  "SwordDealerEast"},
-		{ "Bisento",        "MasterSwordDealer" },
-		{ "Pole",           "MasterSwordDealer" },
-		{ "Soul Cane",      "MasterSwordDealer" },
-		{ "Saber",          "MasterSwordDealer" },
-	}) do
-		ui.actionBtn(shopTab, "  Buy " .. w[1], function() shopBuy(w[2], w[1], w[1]) end)
+	-- Shop item schema:
+	--   item     — exact name BF expects in BuyItem
+	--   npc      — NPC_LOCATIONS key (kept for future TP-required items)
+	--   prereq   — nil for buy-anywhere, or table with:
+	--     kind    — "level" | "boss" | "mastery" | "race" | "fragment" | "quest"
+	--     value   — number for level/fragment/mastery
+	--     target  — string for boss / race / quest name
+	--     hint    — human-readable label for UI + toast
+	-- Items with no prereq go in the regular section; gated items go in
+	-- the QUEST-GATED section with an Unlock button instead of Buy.
+	-- Levels lifted from BF wiki (verified against in-game tooltips for the
+	-- ones we have access to).
+
+	local function tryShopBuy(npc, item, displayName, prereq)
+		local ok = shopBuy(npc, item, displayName)
+		if not ok and prereq and prereq.hint then
+			Toast.show({
+				title = "Locked",
+				body  = (displayName or item) .. "  •  " .. prereq.hint,
+				kind  = "warn", duration = 5,
+				key   = "shop:locked:" .. item,
+			})
+		end
 	end
 
-	ui.sectionLabel(shopTab, "GUNS")
-	for _, w in ipairs({
-		{ "Slingshot",   "WeaponDealer"        },
-		{ "Musket",      "WeaponDealer"        },
-		{ "Flintlock",   "WeaponDealer"        },
-		{ "Refined Slingshot", "WeaponDealer"  },
-		{ "Refined Flintlock", "WeaponDealer"  },
-		{ "Cannon",      "AdvancedWeaponDealer"},
-		{ "Bazooka",     "AdvancedWeaponDealer"},
-		{ "Acidum Rifle","AdvancedWeaponDealer"},
-	}) do
-		ui.actionBtn(shopTab, "  Buy " .. w[1], function() shopBuy(w[2], w[1], w[1]) end)
+	-- Auto-unlock entry point — what to do when the user clicks "Unlock" on
+	-- a gated item. For LEVEL gates we engage Auto Farm Level with the
+	-- right level range and toast guidance. For BOSS / MASTERY / RACE /
+	-- QUEST gates we toast the manual path until we wire each up.
+	local function startUnlock(item, displayName, prereq)
+		if not prereq then return end
+		if prereq.kind == "level" then
+			-- Set min/max around the target level and engage autoFarmLevel
+			cfg.farmLevelMin   = math.max(0, (prereq.value or 0) - 25)
+			cfg.farmLevelMax   = math.max(prereq.value or 0, 9999)
+			cfg.skipBossQuests = true
+			cfg.autoFarmLevel  = true
+			cfg.autoFarm       = true
+			Toast.show({
+				title = "Auto-unlock engaged",
+				body  = "Farming to Lv " .. tostring(prereq.value) .. " for " .. (displayName or item),
+				kind  = "info", duration = 5,
+				key   = "unlock:" .. item,
+			})
+			return
+		end
+		-- Stub paths — surface what we'd need to automate so the user can
+		-- run it manually for now. Hooks land here per-item over time.
+		Toast.show({
+			title = "Manual unlock",
+			body  = (displayName or item) .. "  •  " .. (prereq.hint or "see BF wiki"),
+			kind  = "warn", duration = 6,
+			key   = "unlock:manual:" .. item,
+		})
 	end
 
-	ui.sectionLabel(shopTab, "FIGHT STYLES")
-	for _, s in ipairs({
-		{ "Black Leg",       "AbilityTeacher"       },
-		{ "Electro",         "AbilityTeacher"       },
-		{ "Fishman Karate",  "AbilityTeacher"       },
-		{ "Dragon Claw",     "AbilityTeacher"       },
-		{ "Superhuman",      "AbilityTeacher"       },
-		{ "Death Step",      "AbilityTeacher"       },
-		{ "Sharkman Karate", "WaterKungFuTeacher"   },
-		{ "Dark Step",       "DarkStepTeacher"      },
-		{ "Water Kung-Fu",   "WaterKungFuTeacher"   },
-	}) do
-		ui.actionBtn(shopTab, "  Learn " .. s[1], function() shopBuy(s[2], s[1], s[1]) end)
+	-- Render a shop section. Items split into BUY (no prereq) and LOCKED
+	-- (gated). Each LOCKED row shows the gate inline and an Unlock button
+	-- instead of Buy.
+	local function renderShopSection(parent, title, verb, items)
+		ui.sectionLabel(parent, title)
+		local locked = {}
+		for _, e in ipairs(items) do
+			if e.prereq then
+				table.insert(locked, e)
+			else
+				ui.actionBtn(parent, "  " .. verb .. " " .. e.item, function()
+					tryShopBuy(e.npc, e.item, e.item, nil)
+				end)
+			end
+		end
+		if #locked > 0 then
+			ui.sectionLabel(parent, title .. " — LOCKED")
+			for _, e in ipairs(locked) do
+				ui.actionBtn(parent, "  " .. verb .. " " .. e.item .. "  •  " .. e.prereq.hint, function()
+					-- Try the buy first — server is the authority on lock state.
+					-- If we're already past the gate, this succeeds.
+					tryShopBuy(e.npc, e.item, e.item, e.prereq)
+				end)
+				ui.actionBtn(parent, "      ▶ Auto-unlock " .. e.item, function()
+					startUnlock(e.item, e.item, e.prereq)
+				end)
+			end
+		end
 	end
+
+	renderShopSection(shopTab, "SWORDS", "Buy", {
+		{ item = "Cutlass",       npc = "SwordDealer"        },
+		{ item = "Katana",        npc = "SwordDealer"        },
+		{ item = "Iron Mace",     npc = "SwordDealer",       prereq = {kind="level", value=10,  hint="Lv 10"} },
+		{ item = "Dual Katana",   npc = "SwordDealerWest",   prereq = {kind="level", value=50,  hint="Lv 50"} },
+		{ item = "Triple Katana", npc = "SwordDealerEast",   prereq = {kind="level", value=100, hint="Lv 100"} },
+		{ item = "Bisento",       npc = "MasterSwordDealer", prereq = {kind="level", value=120, hint="Lv 120"} },
+		{ item = "Pole",          npc = "MasterSwordDealer", prereq = {kind="quest", target="SkyQuest tier 2",   hint="Skylands → Dark Master quest"} },
+		{ item = "Soul Cane",     npc = "MasterSwordDealer", prereq = {kind="boss",  target="Cursed Captain",     hint="Defeat Cursed Captain (Sea Event)"} },
+		{ item = "Saber",         npc = "MasterSwordDealer", prereq = {kind="boss",  target="Saber Expert",       hint="Defeat Saber Expert"} },
+	})
+
+	renderShopSection(shopTab, "GUNS", "Buy", {
+		{ item = "Slingshot",         npc = "WeaponDealer"         },
+		{ item = "Musket",            npc = "WeaponDealer",         prereq = {kind="level", value=50,  hint="Lv 50"} },
+		{ item = "Flintlock",         npc = "WeaponDealer",         prereq = {kind="level", value=30,  hint="Lv 30"} },
+		{ item = "Refined Slingshot", npc = "WeaponDealer",         prereq = {kind="level", value=90,  hint="Lv 90"} },
+		{ item = "Refined Flintlock", npc = "WeaponDealer",         prereq = {kind="level", value=150, hint="Lv 150"} },
+		{ item = "Cannon",            npc = "AdvancedWeaponDealer", prereq = {kind="level", value=200, hint="Lv 200"} },
+		{ item = "Bazooka",           npc = "AdvancedWeaponDealer", prereq = {kind="level", value=250, hint="Lv 250"} },
+		{ item = "Acidum Rifle",      npc = "AdvancedWeaponDealer", prereq = {kind="boss",  target="Fishman Lord", hint="Defeat Fishman Lord"} },
+	})
+
+	renderShopSection(shopTab, "FIGHT STYLES", "Learn", {
+		{ item = "Black Leg",       npc = "AbilityTeacher",     prereq = {kind="level",    value=30,  hint="Lv 30 + 50k Beli"} },
+		{ item = "Dark Step",       npc = "DarkStepTeacher",    prereq = {kind="level",    value=75,  hint="Lv 75 + 50k Beli"} },
+		{ item = "Electro",         npc = "AbilityTeacher",     prereq = {kind="fragment", value=350, hint="350 Fragments (Skylands)"} },
+		{ item = "Fishman Karate",  npc = "AbilityTeacher",     prereq = {kind="level",    value=250, hint="Lv 250 + 750k Beli"} },
+		{ item = "Dragon Claw",     npc = "AbilityTeacher",     prereq = {kind="quest",    target="random gacha", hint="Gacha unlock + 1.5k Fragments"} },
+		{ item = "Death Step",      npc = "AbilityTeacher",     prereq = {kind="mastery",  target="Black Leg", value=400, hint="Black Leg M400 + 950k Beli"} },
+		{ item = "Superhuman",      npc = "AbilityTeacher",     prereq = {kind="mastery",  target="all 4 base styles", hint="All base styles M400 + 1.5M Beli"} },
+		{ item = "Sharkman Karate", npc = "WaterKungFuTeacher", prereq = {kind="mastery",  target="Fishman Karate", value=400, hint="Fishman Karate M400 + 2.5M Beli"} },
+		{ item = "Water Kung-Fu",   npc = "WaterKungFuTeacher", prereq = {kind="level",    value=300, hint="Lv 300 + 2.5M Beli"} },
+	})
 
 	ui.sectionLabel(shopTab, "HAKI")
-	ui.actionBtn(shopTab, "  Learn Observation Haki", function()
-		shopBuy("InstinctTeacher", "Observation", "Observation Haki")
+	ui.actionBtn(shopTab, "  Learn Observation Haki  •  Defeat Saber Expert + 750k Beli", function()
+		tryShopBuy("InstinctTeacher", "Observation", "Observation Haki",
+			{kind="boss", target="Saber Expert", hint="Defeat Saber Expert + 750k Beli"})
 	end)
-	ui.actionBtn(shopTab, "  Learn Buso Haki", function()
-		shopBuy("AbilityTeacher", "Buso", "Buso Haki")
+	ui.actionBtn(shopTab, "  Learn Buso Haki  •  Lv 300 + 5M Beli", function()
+		tryShopBuy("AbilityTeacher", "Buso", "Buso Haki",
+			{kind="level", value=300, hint="Lv 300 + 5M Beli"})
+	end)
+	ui.actionBtn(shopTab, "      ▶ Auto-unlock Buso Haki", function()
+		startUnlock("Buso", "Buso Haki", {kind="level", value=300, hint="Lv 300"})
 	end)
 
-	ui.sectionLabel(shopTab, "BOATS")
-	for _, b in ipairs({
-		{ "Rowboat",       "BoatDealer"        },
-		{ "Plank Raft",    "BoatDealer"        },
-		{ "Brigade",       "LuxuryBoatDealer"  },
-		{ "Lantern Boat",  "LuxuryBoatDealer"  },
-		{ "The Swan",      "LuxuryBoatDealer"  },
-	}) do
-		ui.actionBtn(shopTab, "  Buy " .. b[1], function() shopBuy(b[2], b[1], b[1]) end)
-	end
+	renderShopSection(shopTab, "BOATS", "Buy", {
+		{ item = "Rowboat",      npc = "BoatDealer"        },
+		{ item = "Plank Raft",   npc = "BoatDealer"        },
+		{ item = "Brigade",      npc = "LuxuryBoatDealer", prereq = {kind="level", value=80,  hint="Lv 80"} },
+		{ item = "Lantern Boat", npc = "LuxuryBoatDealer", prereq = {kind="level", value=250, hint="Lv 250"} },
+		{ item = "The Swan",     npc = "LuxuryBoatDealer", prereq = {kind="level", value=500, hint="Lv 500"} },
+	})
 
 	-- ─── STATS TAB ───
 	local statsPage = ui.newPage("stats")
