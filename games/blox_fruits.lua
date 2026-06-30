@@ -2122,29 +2122,31 @@ function Module.start(lib)
 	-- RemoteFunction on the tool is for M1 combat, NOT abilities.
 	local SLOT_NAMES = { "Z", "X", "C", "V", "F" }
 
+	-- Map slot name → KeyCode for VirtualInputManager. BF's own local
+	-- scripts listen for these keys and handle the proper remote firing
+	-- with the right hash + serialization — much more reliable than us
+	-- guessing at the FireServer protocol per-weapon.
+	local VIM = game:GetService("VirtualInputManager")
+	local SLOT_KEYS = {
+		Z = Enum.KeyCode.Z, X = Enum.KeyCode.X,
+		C = Enum.KeyCode.C, V = Enum.KeyCode.V,
+		F = Enum.KeyCode.F,
+	}
+
 	local function abilityRotationTick()
-		if not cfg.autoFarm then return end
+		-- Previously gated on cfg.autoFarm — that meant abilities could
+		-- only fire while the auto-farm was on, which is exactly when the
+		-- user is least likely to NOTICE failures. Now: fires whenever
+		-- the user has at least one slot enabled, regardless of autoFarm.
+		-- Useful as a defensive auto-cast even during manual play.
 		local ch = LocalPlayer.Character
 		local tool = ch and ch:FindFirstChildOfClass("Tool")
 		if not tool then return end
 
-		local re = tool:FindFirstChild("RemoteEvent")
-		if not re or not re:IsA("RemoteEvent") then return end
-		if re.Name == "EquipEvent" then
-			for _, c in ipairs(tool:GetChildren()) do
-				if c:IsA("RemoteEvent") and c.Name ~= "EquipEvent" and c.Name ~= "LegacyRemoteEvent" then
-					re = c
-					break
-				end
-			end
-		end
-
-		local legacyRe = tool:FindFirstChild("LegacyRemoteEvent")
-		local targetRe = legacyRe and legacyRe:IsA("RemoteEvent") and legacyRe or re
-
-		local mousePosVal = tool:FindFirstChild("MousePos")
-		local holdingVal = tool:FindFirstChild("Holding")
-
+		-- Aim the ability at the current target, or 50 studs forward if
+		-- nothing's locked. BF reads MousePos off the tool when firing
+		-- directional abilities; without this they aim at the cursor's
+		-- last screen position (often offscreen during auto-farm).
 		local targetPos
 		local enemy = currentTarget
 		if enemy and enemy.Parent then
@@ -2155,46 +2157,50 @@ function Module.start(lib)
 			local hrp = ch:FindFirstChild("HumanoidRootPart")
 			targetPos = hrp and (hrp.Position + (hrp.CFrame.LookVector * 50))
 		end
-		if not targetPos then return end
+		local mousePosVal = tool:FindFirstChild("MousePos")
+		if targetPos and mousePosVal and mousePosVal:IsA("Vector3Value") then
+			mousePosVal.Value = targetPos
+		end
+
+		-- Build canFire from slots that BOTH (a) the user enabled AND
+		-- (b) actually exist on the current weapon AND (c) are off
+		-- cooldown. Old code added non-existent slots to canFire which
+		-- pressed dead keys. With Bisento equipped only Z and X exist;
+		-- pressing C/V/F was wasted scheduling.
+		local pg = LocalPlayer:FindFirstChild("PlayerGui")
+		local combatFrame = pg and pg:FindFirstChild("Main")
+			and pg.Main:FindFirstChild("Skills")
+			and pg.Main.Skills:FindFirstChild("Combat")
 
 		local canFire = {}
-		local pg = LocalPlayer:FindFirstChild("PlayerGui")
-		local mainGui = pg and pg:FindFirstChild("Main")
-		local skillsGui = mainGui and mainGui:FindFirstChild("Skills")
-		local combatFrame = skillsGui and skillsGui:FindFirstChild("Combat")
-		if combatFrame then
-			for _, slot in ipairs(SLOT_NAMES) do
-				if cfg.abilitySlots[slot] then
+		for _, slot in ipairs(SLOT_NAMES) do
+			if cfg.abilitySlots[slot] and SLOT_KEYS[slot] then
+				local ok = true
+				if combatFrame then
 					local slotFrame = combatFrame:FindFirstChild(slot)
-					if slotFrame then
-						local cdFrame = slotFrame:FindFirstChild("Cooldown")
-						if not cdFrame or not cdFrame.Visible then
-							table.insert(canFire, slot)
-						end
+					if not slotFrame then
+						ok = false  -- weapon has no ability in this slot
 					else
-						table.insert(canFire, slot)
+						local cdFrame = slotFrame:FindFirstChild("Cooldown")
+						if cdFrame and cdFrame.Visible then
+							ok = false  -- on cooldown
+						end
 					end
 				end
-			end
-		else
-			for _, slot in ipairs(SLOT_NAMES) do
-				if cfg.abilitySlots[slot] then
-					table.insert(canFire, slot)
-				end
+				if ok then table.insert(canFire, slot) end
 			end
 		end
 
+		-- Press each enabled key via VirtualInputManager. BF's local
+		-- input listener fires the right ability remote with the right
+		-- hash + args. Faster, more reliable, and one ability path that
+		-- works across every weapon (sword, gun, melee, fruit).
 		for _, slot in ipairs(canFire) do
 			safe(function()
-				if mousePosVal and mousePosVal:IsA("Vector3Value") then
-					mousePosVal.Value = targetPos
-				end
-				targetRe:FireServer(true)
-				targetRe:FireServer(targetPos)
-				if holdingVal and holdingVal:IsA("BoolValue") then
-					holdingVal.Value = true
-					task.delay(0.15, function() holdingVal.Value = false end)
-				end
+				local key = SLOT_KEYS[slot]
+				VIM:SendKeyEvent(true,  key, false, game)
+				task.wait(0.05)
+				VIM:SendKeyEvent(false, key, false, game)
 			end)
 			task.wait(0.05)
 		end
