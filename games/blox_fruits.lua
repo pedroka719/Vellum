@@ -83,6 +83,8 @@ function Module.start(lib)
 		-- ability rotation
 		abilitySlots = { Z = false, X = false, C = false, V = false, F = false },
 		abilityCadence = 2.0,        -- sec between ability activations
+		abilityAim     = false,      -- aim mouse at target before each press
+		                             -- (turns directional abilities into aimbot)
 
 		-- fruit sniper — auto-tween to dropped devil fruits and let
 		-- natural collision pickup grab them. Pure passive collection,
@@ -2133,6 +2135,85 @@ function Module.start(lib)
 		F = Enum.KeyCode.F,
 	}
 
+	-- ─── ABILITY AIMBOT ───
+	-- Pick the best aim target: currentTarget if alive, else nearest
+	-- monster within 600 studs, else nearest hostile player within 600.
+	-- We deliberately avoid Logia immunes — no point aiming at someone
+	-- we can't damage.
+	local function _findAimTarget()
+		local ch = LocalPlayer.Character
+		local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+		if not hrp then return nil end
+
+		-- Prefer currentTarget if the auto-farm is locked on one
+		if currentTarget and currentTarget.Parent then
+			local th = currentTarget:FindFirstChild("HumanoidRootPart")
+			local hum = currentTarget:FindFirstChild("Humanoid")
+			if th and hum and hum.Health > 0 then return th end
+		end
+
+		local bestPart, bestDist
+		-- Monsters
+		local enemies = workspace:FindFirstChild("Enemies")
+		if enemies then
+			for _, e in ipairs(enemies:GetChildren()) do
+				local eh = e:FindFirstChild("HumanoidRootPart")
+				local hum = e:FindFirstChild("Humanoid")
+				if eh and hum and hum.Health > 0 then
+					local fruitType = e:GetAttribute("FruitType")
+					local busoNeeded = e:GetAttribute("BusoEnabled")
+					if not (fruitType == "Logia" and busoNeeded and _hasBuso == false) then
+						local d = (eh.Position - hrp.Position).Magnitude
+						if d < 600 and (not bestDist or d < bestDist) then
+							bestPart, bestDist = eh, d
+						end
+					end
+				end
+			end
+		end
+		-- Hostile players (other team — uses _playerColor logic indirectly)
+		for _, p in ipairs(game:GetService("Players"):GetPlayers()) do
+			if p ~= LocalPlayer then
+				local pch = p.Character
+				local ph = pch and pch:FindFirstChild("HumanoidRootPart")
+				local hum = pch and pch:FindFirstChild("Humanoid")
+				if ph and hum and hum.Health > 0 then
+					local sameTeam = p.Team and LocalPlayer.Team and p.Team == LocalPlayer.Team
+					if not sameTeam then
+						local d = (ph.Position - hrp.Position).Magnitude
+						if d < 600 and (not bestDist or d < bestDist) then
+							bestPart, bestDist = ph, d
+						end
+					end
+				end
+			end
+		end
+		return bestPart
+	end
+
+	-- Move the actual OS mouse to the target's screen position. BF's
+	-- Mouse.Hit raycasts from the camera through the mouse pixel — so
+	-- moving the mouse to where the target renders makes directional
+	-- abilities aim at it. No hooks, no metatable manipulation; just
+	-- VirtualInputManager.SendMouseMoveEvent. Anti-cheat-safe.
+	--
+	-- If the target is offscreen, we briefly snap the camera to face
+	-- them first. Visually jarring but only happens for far-rear
+	-- targets, and the snap is instantaneous so it just looks like a
+	-- camera flick.
+	local function _aimMouseAt(part)
+		if not part then return end
+		local cam = workspace.CurrentCamera
+		if not cam then return end
+		local screen, onScreen = cam:WorldToViewportPoint(part.Position)
+		if not onScreen then
+			cam.CFrame = CFrame.lookAt(cam.CFrame.Position, part.Position)
+			task.wait()  -- one frame for camera to update
+			screen = cam:WorldToViewportPoint(part.Position)
+		end
+		VIM:SendMouseMoveEvent(screen.X, screen.Y, game)
+	end
+
 	local function abilityRotationTick()
 		-- Previously gated on cfg.autoFarm — that meant abilities could
 		-- only fire while the auto-farm was on, which is exactly when the
@@ -2191,6 +2272,16 @@ function Module.start(lib)
 			end
 		end
 
+		-- Aimbot: if enabled, find the best target and point the mouse
+		-- at it ONCE before the keypress burst. Cheaper than re-aiming
+		-- per slot since all slots in this tick share the same cadence
+		-- and BF reads Mouse.Hit at the moment of FireServer.
+		local aimPart
+		if cfg.abilityAim then
+			aimPart = _findAimTarget()
+			if aimPart then _aimMouseAt(aimPart) end
+		end
+
 		-- Press each enabled key via VirtualInputManager. BF's local
 		-- input listener fires the right ability remote with the right
 		-- hash + args. Faster, more reliable, and one ability path that
@@ -2198,6 +2289,12 @@ function Module.start(lib)
 		for _, slot in ipairs(canFire) do
 			safe(function()
 				local key = SLOT_KEYS[slot]
+				-- Re-aim per slot too — abilities at the end of the burst
+				-- may have a different target if the previous one killed
+				-- a mob and pickEnemy switched currentTarget mid-tick.
+				if cfg.abilityAim and aimPart and aimPart.Parent then
+					_aimMouseAt(aimPart)
+				end
 				VIM:SendKeyEvent(true,  key, false, game)
 				task.wait(0.05)
 				VIM:SendKeyEvent(false, key, false, game)
@@ -2604,6 +2701,9 @@ function Module.start(lib)
 	ui.toggleRow(farm, "F",
 		function() return cfg.abilitySlots.F end,
 		function(v) cfg.abilitySlots.F = v end)
+	ui.toggleRow(farm, "Aimbot (point mouse at target before each ability)",
+		function() return cfg.abilityAim end,
+		function(v) cfg.abilityAim = v end)
 	ui.sliderRow(farm, "Ability cadence (sec)",
 		function() return cfg.abilityCadence end,
 		function(v) cfg.abilityCadence = v end,
