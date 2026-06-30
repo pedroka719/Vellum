@@ -2510,8 +2510,13 @@ function Module.start(lib)
 		{ min = 10, max = 250, step = 5, suffix = " st" })
 
 	ui.sectionLabel(farm, "WEAPON STYLE")
-	local weaponStyles = getWeaponOptions()
-	table.insert(weaponStyles, 1, "Auto")
+	-- Static list of BF's four weapon style categories. Used to be
+	-- getWeaponOptions() which scanned the live backpack — but at UI
+	-- build time the character often hasn't loaded yet and the scan
+	-- returns empty, leaving only "Auto" visible. The categories never
+	-- change, so just hardcode them and let the user set a priority
+	-- even before they own a weapon of that type (future-proof).
+	local weaponStyles = { "Auto", "Melee", "Sword", "Gun", "Blox Fruit" }
 	ui.dropdownRow(farm, "Style priority",
 		weaponStyles,
 		function() return cfg.selectedWeapon ~= "" and cfg.selectedWeapon or "Auto" end,
