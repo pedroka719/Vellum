@@ -2374,19 +2374,27 @@ function Module.start(lib)
 		-- mirrors immediately. AAIM is the in-game flag the skill handler reads.
 		LocalPlayer:SetAttribute("AAIM", cfg.abilityAimPlayers and true or false)
 
-		-- Honor on-screen cooldown indicators when available.
+		-- Honor on-screen cooldown indicators when available. BF's skill UI lives
+		-- under PlayerGui.Main.Skills.<ToolName> (e.g. "Bisento", "Dough"), NOT
+		-- "Combat" — that's a template frame with Cooldown.Visible baked to true
+		-- so reading Visible always returns "cooling". The real signal is
+		-- Cooldown.Size.X.Scale: 0 = ready, >0 = cooling (BF animates the fill).
+		-- We also keep a tool-name-agnostic fallback that lets every fire through
+		-- when the UI isn't where we expect — the server enforces its own
+		-- cooldown, so wasted fires are silent no-ops, not damage glitches.
 		local canFire = {}
 		local pg = LocalPlayer:FindFirstChild("PlayerGui")
 		local mainGui = pg and pg:FindFirstChild("Main")
 		local skillsGui = mainGui and mainGui:FindFirstChild("Skills")
-		local combatFrame = skillsGui and skillsGui:FindFirstChild("Combat")
+		local tool = ch:FindFirstChildOfClass("Tool")
+		local skillFrame = skillsGui and tool and skillsGui:FindFirstChild(tool.Name)
 		for _, slot in ipairs(SLOT_NAMES) do
 			if cfg.abilitySlots[slot] then
 				local ready = true
-				if combatFrame then
-					local slotFrame = combatFrame:FindFirstChild(slot)
-					local cdFrame = slotFrame and slotFrame:FindFirstChild("Cooldown")
-					if cdFrame and cdFrame.Visible then ready = false end
+				if skillFrame then
+					local slotFrame = skillFrame:FindFirstChild(slot)
+					local cdFrame   = slotFrame and slotFrame:FindFirstChild("Cooldown")
+					if cdFrame and cdFrame.Size.X.Scale > 0.01 then ready = false end
 				end
 				if ready then table.insert(canFire, slot) end
 			end
