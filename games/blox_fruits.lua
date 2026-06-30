@@ -2145,7 +2145,8 @@ function Module.start(lib)
 		F = Enum.KeyCode.F,
 	}
 
-	local function fireAbility(slot)
+	-- Fruit fire path: BF's mobile UI calls _G.casFunc("DevilFruit", Begin, input, kc).
+	local function fireFruitAbility(slot)
 		local fn = rawget(_G, "casFunc")
 		if type(fn) ~= "function" then return false end
 		local kc = KEYCODE[slot]
@@ -2155,8 +2156,37 @@ function Module.start(lib)
 			UserInputType  = Enum.UserInputType.Keyboard,
 			KeyCode        = kc,
 		}
-		local ok = pcall(fn, "DevilFruit", Enum.UserInputState.Begin, input, kc)
-		return ok
+		return pcall(fn, "DevilFruit", Enum.UserInputState.Begin, input, kc)
+	end
+
+	-- Sword fire path: per the decompiled Bisento Tool LocalScript, sword skills fire by
+	--   1. tool.RemoteEvent:FireServer(targetPos)   — position target
+	--   2. tool.RemoteFunction:InvokeServer(slot)   — damage trigger (this is the key step
+	--      the previous protocol was missing). slot = "Z" or "X".
+	-- Most sword tools follow this pattern; ones that don't (Gravity Cane, etc.) will
+	-- silently fail the InvokeServer call without throwing.
+	local function fireToolAbility(slot, targetPos)
+		local ch = LocalPlayer.Character
+		local tool = ch and ch:FindFirstChildOfClass("Tool")
+		if not tool then return false end
+		local re = tool:FindFirstChild("RemoteEvent")
+		local rf = tool:FindFirstChild("RemoteFunction")
+		if not (re and re:IsA("RemoteEvent") and rf and rf:IsA("RemoteFunction")) then
+			return false
+		end
+		-- MousePos sync (some skills read this directly).
+		local mp = tool:FindFirstChild("MousePos")
+		if mp and mp:IsA("Vector3Value") and targetPos then
+			mp.Value = targetPos
+		end
+		pcall(function() re:FireServer(targetPos) end)
+		pcall(function() rf:InvokeServer(slot) end)
+		return true
+	end
+
+	local function fireAbility(slot, targetPos)
+		if fireFruitAbility(slot) then return true end
+		return fireToolAbility(slot, targetPos)
 	end
 
 	local function abilityRotationTick()
@@ -2164,10 +2194,6 @@ function Module.start(lib)
 		local ch = LocalPlayer.Character
 		local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
 		if not hrp then return end
-
-		-- Need a fruit equipped for casFunc to be bound. If the player has
-		-- no fruit, _G.casFunc won't exist and we silently no-op.
-		if type(rawget(_G, "casFunc")) ~= "function" then return end
 
 		-- Sync player auto-aim with our config every tick so toggling the UI
 		-- mirrors immediately. AAIM is the in-game flag the skill handler reads.
@@ -2192,16 +2218,20 @@ function Module.start(lib)
 		end
 		if #canFire == 0 then return end
 
-		-- Aim: rotate HRP to face the current mob if we have one. casFunc's
-		-- target resolution for non-player skills uses character look vector
-		-- (focusAdjust in CombatController), so facing the mob = ability lands
-		-- on the mob. Skipped when abilityAimMobs is off so the user can
-		-- self-aim if they prefer.
+		-- Resolve target position. Sword fires take an explicit Vector3; fruit fires
+		-- use look-vector (so we still rotate HRP for fruit case).
 		local mob = currentTarget
 		local mobHrp = mob and mob.Parent and mob:FindFirstChild("HumanoidRootPart")
+		local targetPos
+		if mobHrp then
+			targetPos = mobHrp.Position
+		else
+			targetPos = hrp.Position + (hrp.CFrame.LookVector * 30)
+		end
+
 		local restoreAuto
 		if cfg.abilityAimMobs and mobHrp then
-			restoreAuto = hrp.CFrame
+			restoreAuto = true
 			local hum = ch:FindFirstChildOfClass("Humanoid")
 			if hum then hum.AutoRotate = false end
 			local p = hrp.Position
@@ -2210,7 +2240,7 @@ function Module.start(lib)
 		end
 
 		for _, slot in ipairs(canFire) do
-			safe(function() fireAbility(slot) end)
+			safe(function() fireAbility(slot, targetPos) end)
 			task.wait(0.05)
 		end
 
