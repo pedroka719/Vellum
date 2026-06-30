@@ -2835,19 +2835,41 @@ function Module.start(lib)
 			return
 		end
 
-		-- MASTERY — pin the prereq weapon style so every kill builds mastery
-		-- toward the threshold. Server tracks mastery on the equipped Tool;
-		-- we can't read the exact number client-side without inspecting the
-		-- Tool's attributes per-respawn (varies by weapon), but pinning the
-		-- style + letting the farm run + polling BuyItem is the working
-		-- path. Once mastery hits the gate, server accepts the buy.
+		-- MASTERY — server tracks mastery on the equipped Tool. To grow a
+		-- specific style's mastery the user needs that style ACTIVE in
+		-- combat. The script controls weapon TYPE (Melee/Sword/Gun/Fruit)
+		-- via cfg.selectedWeapon, but fight-style names like "Black Leg"
+		-- aren't weapon types — they're learned techniques bound to the
+		-- Melee slot in BF's HUD. Mapping every fight style to "Melee"
+		-- and pinning that would also override whatever the user picked
+		-- on the Farm tab (the bug LO hit when clicking Superhuman with
+		-- 'Sword' selected — selectedWeapon got overwritten with the
+		-- gibberish string "all 4 base styles" which equipped nothing
+		-- valid, falling to the Melee preference).
+		--
+		-- Safer behavior:
+		--   1. ONLY pin selectedWeapon when prereq.target is exactly one
+		--      of the 4 valid weapon types — respects the user's manual
+		--      style choice for anything else.
+		--   2. Always toast the manual guidance so the user knows what
+		--      they need to do with their hotbar.
+		--   3. Always engage autoFarm + poll buy — mastery grows
+		--      passively from kills, and the poll catches the gate lift.
 		if kind == "mastery" then
-			cfg.selectedWeapon = prereq.target  -- ensureWeaponEquipped uses this
-			cfg.autoFarm       = true
+			local VALID_STYLES = { Melee=true, Sword=true, Gun=true, ["Blox Fruit"]=true }
+			local target = prereq.target
+			local pinned = false
+			if VALID_STYLES[target] then
+				cfg.selectedWeapon = target
+				pinned = true
+			end
+			cfg.autoFarm = true
 			Toast.show({
-				title = "Mastery unlock engaged",
-				body  = "Pinned " .. prereq.target .. " — farm to grow mastery, will auto-buy " .. (displayName or item),
-				kind  = "info", duration = 6,
+				title = pinned and "Mastery unlock engaged" or "Mastery unlock — manual",
+				body  = pinned
+					and ("Pinned " .. target .. " — auto-buy " .. (displayName or item) .. " when M" .. tostring(prereq.value or "?") .. " hits")
+					or  ((displayName or item) .. "  •  " .. (prereq.hint or "")),
+				kind  = pinned and "info" or "warn", duration = 7,
 				key   = "unlock:" .. item,
 			})
 			_pollUntilBought(item, displayName)
