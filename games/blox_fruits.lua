@@ -2401,15 +2401,44 @@ function Module.start(lib)
 		end
 		if #canFire == 0 then return end
 
-		-- Resolve target position. Sword fires take an explicit Vector3; fruit fires
-		-- use look-vector (so we still rotate HRP for fruit case).
+		-- Resolve target position. The autoFarm pickEnemy + currentTarget pipeline
+		-- isn't reliable for ability fires (timing gaps, hash respawn, ESP
+		-- contention), so we do our OWN nearest-live-enemy scan here. Look-vector
+		-- fallback is useless for sword slams — Bisento Z deposits AOE damage
+		-- at the target position, so without a real Vector3 the swing lands in
+		-- empty air and registers as a wasted fire. Verified via remote spy:
+		-- our protocol replicates correctly but with a phantom target.
 		local mob = currentTarget
 		local mobHrp = mob and mob.Parent and mob:FindFirstChild("HumanoidRootPart")
+		local mobHealthy = mob and mob.Parent and (function()
+			local h = mob:FindFirstChild("Humanoid"); return h and h.Health > 0
+		end)()
+		if not (mobHrp and mobHealthy) then
+			local enemies = workspace:FindFirstChild("Enemies")
+			if enemies then
+				local closest, cdist = nil, math.huge
+				local self = hrp.Position
+				for _, e in ipairs(enemies:GetChildren()) do
+					local eh = e:FindFirstChild("HumanoidRootPart")
+					local hum = e:FindFirstChild("Humanoid")
+					if eh and hum and hum.Health > 0 then
+						local d = (eh.Position - self).Magnitude
+						if d < cdist and d < 200 then
+							cdist = d; closest = eh; mob = e
+						end
+					end
+				end
+				mobHrp = closest
+			end
+		end
 		local targetPos
 		if mobHrp then
 			targetPos = mobHrp.Position
 		else
-			targetPos = hrp.Position + (hrp.CFrame.LookVector * 30)
+			-- No mob in range — skip this tick entirely rather than fire at air.
+			-- The cooldown reservation is server-side; firing at nothing
+			-- consumes the cooldown for no damage.
+			return
 		end
 
 		local restoreAuto
