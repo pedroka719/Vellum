@@ -677,6 +677,50 @@ function Module.start(lib)
 		end
 	end
 
+	-- Portal-touch helper. Drops the character on the cross-sea trigger Part
+	-- and spam-CFrames for ~1.5s (or until sea index flips). Verified live
+	-- to cross in ~550ms when nothing else is moving HRP. Returns true on
+	-- crossover.
+	local function _crossSeaPortal(hrp, fromSea, toSea)
+		local portals = _liveSeaPortal()
+		local portal  = (fromSea == 1) and portals.sea1to2 or portals.sea2to1
+		local ch = hrp.Parent
+
+		-- Kill body movers so flight/dash residuals don't pull us off.
+		for _, c in ipairs(hrp:GetChildren()) do
+			if c:IsA("BodyMover") or c:IsA("BodyVelocity") or c:IsA("BodyPosition")
+			   or c:IsA("BodyGyro") or c:IsA("LinearVelocity") or c:IsA("AlignPosition")
+			   or c:IsA("VectorForce") then
+				pcall(function() c:Destroy() end)
+			end
+		end
+		local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+		if hum then hum.Sit = false; hum.PlatformStand = false end
+
+		-- Spam-snap on the trigger Part for up to 1.5s.
+		for _ = 1, 30 do
+			pcall(function()
+				hrp.CFrame = CFrame.new(portal.entry)
+				hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+			end)
+			task.wait(0.05)
+			if _whichSea(hrp.Position) == toSea then
+				pcall(function() hrp.CFrame = hrp.CFrame + Vector3.new(0, 8, 0) end)
+				return true
+			end
+		end
+		-- Touched event sometimes lands between checks — final short poll.
+		local t0 = tick()
+		while tick() - t0 < 1.5 do
+			task.wait(0.1)
+			if _whichSea(hrp.Position) == toSea then
+				pcall(function() hrp.CFrame = hrp.CFrame + Vector3.new(0, 8, 0) end)
+				return true
+			end
+		end
+		return false
+	end
+
 	local function _tweenHRPTo(hrp, destPos, opts)
 		opts = opts or {}
 		local speed         = opts.speed         or TP_TWEEN_SPEED
@@ -684,6 +728,29 @@ function Module.start(lib)
 		local maxRetries    = opts.retries        or 2
 
 		if activeTween then pcall(function() activeTween:Cancel() end) end
+
+		-- Cross-sea? Route through the touch portal first. Callers like
+		-- the post-respawn return path and fruit sniper hit this whenever
+		-- they need to cross the 60K-stud sea gap. Without this they'd
+		-- segment-tween the full distance (~10 minutes); with it, they
+		-- portal-jump in ~1s and the final tween handles the short hop.
+		-- Skip the portal hop when caller explicitly disables it (already
+		-- in a portal sequence, sub-zone snap, etc.).
+		if not opts.skipPortal then
+			local fromSea = _whichSea(hrp.Position)
+			local toSea   = _whichSea(destPos)
+			if fromSea ~= toSea then
+				-- Get within ~800 studs of the portal first (anti-cheat tolerates
+				-- short snaps; longer ones trip CheckTeleportGlitchFix).
+				local portals = _liveSeaPortal()
+				local entry = ((fromSea == 1) and portals.sea1to2 or portals.sea2to1).entry
+				if (hrp.Position - entry).Magnitude > 800 then
+					_tweenHRPTo(hrp, entry, { skipPortal = true, speed = speed, retries = 1 })
+				end
+				_crossSeaPortal(hrp, fromSea, toSea)
+				-- Fall through to normal tween for the remaining distance.
+			end
+		end
 
 		local destCF = CFrame.new(destPos, destPos - Vector3.new(0, 0, 1))
 		local dist = (destPos - hrp.Position).Magnitude
