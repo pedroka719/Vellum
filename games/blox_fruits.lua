@@ -745,8 +745,8 @@ function Module.start(lib)
 		{ lvlMin = 240, lvlMax = 249, island = "Prison",          questId = "ImpelQuest",    tier = 3, mob = "Swan",              taskCount = 1, boss = true },
 		{ lvlMin = 250, lvlMax = 274, island = "Prison",          questId = "ColosseumQuest",tier = 1, mob = "Toga Warrior",    taskCount = 7 },
 		{ lvlMin = 275, lvlMax = 299, island = "Prison",          questId = "ColosseumQuest",tier = 2, mob = "Gladiator",       taskCount = 8 },
-		{ lvlMin = 300, lvlMax = 324, island = "Magma Village",   questId = "MagmaQuest",    tier = 1, mob = "Mil. Soldier",    taskCount = 7 },
-		{ lvlMin = 325, lvlMax = 349, island = "Magma Village",   questId = "MagmaQuest",    tier = 2, mob = "Mil. Spy",        taskCount = 8 },
+		{ lvlMin = 300, lvlMax = 324, island = "Magma Village",   questId = "MagmaQuest",    tier = 1, mob = "Military Soldier", taskCount = 7 },
+		{ lvlMin = 325, lvlMax = 349, island = "Magma Village",   questId = "MagmaQuest",    tier = 2, mob = "Military Spy",     taskCount = 8 },
 		{ lvlMin = 350, lvlMax = 374, island = "Magma Village",   questId = "MagmaQuest",    tier = 3, mob = "Magma Admiral",   taskCount = 1, boss = true },
 		{ lvlMin = 375, lvlMax = 399, island = "Underwater City", questId = "FishmanQuest",  tier = 1, mob = "Fishman Warrior", taskCount = 8 },
 		{ lvlMin = 400, lvlMax = 424, island = "Underwater City", questId = "FishmanQuest",  tier = 2, mob = "Fishman Commando",taskCount = 7 },
@@ -907,14 +907,22 @@ function Module.start(lib)
 		return { current = tonumber(cur), target = tonumber(tgt), raw = text }
 	end
 
-	-- True if the HUD-displayed quest matches our target quest. Substring
-	-- match against quest.mob — the HUD pluralizes ("Prisoners" contains
-	-- "Prisoner", "Dark Masters" contains "Dark Master"), so a 1:1 string
-	-- match would fail. We can't rely on taskCount alone because multiple
-	-- quests share the same count (Prisoner=8, Dark Master=8, Bandit=...).
+	-- True if the HUD-displayed quest matches our target quest. We match
+	-- on the LAST WORD of quest.mob to tolerate BF's two name conventions:
+	--   workspace.Enemies model name: "Military Soldier"
+	--   HUD quest text:               "Defeat 7 Mil. Soldiers (0/7)"
+	-- Substring of full quest.mob would miss because HUD abbreviates
+	-- ("Mil." vs "Military"). Last-word match works because the trailing
+	-- noun ("Soldier", "Prisoner", "Master", "Bandit") is what BF
+	-- pluralizes in the HUD, never abbreviates. Level-range gating in
+	-- pickQuest prevents ambiguous trailing words (Snow Bandit + Desert
+	-- Bandit are never both active simultaneously).
 	local function hudIsQuest(srv, quest)
 		if not srv or not quest then return false end
-		return srv.raw:find(quest.mob, 1, true) ~= nil
+		local mob = quest.mob or ""
+		-- Pull the last word — split on space, take rightmost
+		local lastWord = mob:match("(%S+)$") or mob
+		return srv.raw:find(lastWord, 1, true) ~= nil
 	end
 
 	-- Kill-counter update. We keep Q.kills as a local mirror but the SERVER is
