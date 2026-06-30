@@ -2136,81 +2136,38 @@ function Module.start(lib)
 	}
 
 	-- ─── ABILITY AIMBOT ───
-	-- Pick the best aim target: currentTarget if alive, else nearest
-	-- monster within 600 studs, else nearest hostile player within 600.
-	-- We deliberately avoid Logia immunes — no point aiming at someone
-	-- we can't damage.
+	-- Strict: only aim at the auto-farm's currentTarget. The previous
+	-- 'nearest monster / nearest player' fallback caused the character
+	-- to fly off-spawn — BF abilities like Z dashes use Mouse.Hit for
+	-- direction, so aiming at a random nearby mob made the dash teleport
+	-- us to that mob's location, pulling us away from the quest spawn.
+	-- Then no targets in range → auto-farm hovered uselessly.
+	--
+	-- For PvP / boss hunts the user can manually pick a target — once
+	-- the auto-farm picks them up, currentTarget reflects that and the
+	-- aimbot follows.
 	local function _findAimTarget()
-		local ch = LocalPlayer.Character
-		local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
-		if not hrp then return nil end
-
-		-- Prefer currentTarget if the auto-farm is locked on one
-		if currentTarget and currentTarget.Parent then
-			local th = currentTarget:FindFirstChild("HumanoidRootPart")
-			local hum = currentTarget:FindFirstChild("Humanoid")
-			if th and hum and hum.Health > 0 then return th end
-		end
-
-		local bestPart, bestDist
-		-- Monsters
-		local enemies = workspace:FindFirstChild("Enemies")
-		if enemies then
-			for _, e in ipairs(enemies:GetChildren()) do
-				local eh = e:FindFirstChild("HumanoidRootPart")
-				local hum = e:FindFirstChild("Humanoid")
-				if eh and hum and hum.Health > 0 then
-					local fruitType = e:GetAttribute("FruitType")
-					local busoNeeded = e:GetAttribute("BusoEnabled")
-					if not (fruitType == "Logia" and busoNeeded and _hasBuso == false) then
-						local d = (eh.Position - hrp.Position).Magnitude
-						if d < 600 and (not bestDist or d < bestDist) then
-							bestPart, bestDist = eh, d
-						end
-					end
-				end
-			end
-		end
-		-- Hostile players (other team — uses _playerColor logic indirectly)
-		for _, p in ipairs(game:GetService("Players"):GetPlayers()) do
-			if p ~= LocalPlayer then
-				local pch = p.Character
-				local ph = pch and pch:FindFirstChild("HumanoidRootPart")
-				local hum = pch and pch:FindFirstChild("Humanoid")
-				if ph and hum and hum.Health > 0 then
-					local sameTeam = p.Team and LocalPlayer.Team and p.Team == LocalPlayer.Team
-					if not sameTeam then
-						local d = (ph.Position - hrp.Position).Magnitude
-						if d < 600 and (not bestDist or d < bestDist) then
-							bestPart, bestDist = ph, d
-						end
-					end
-				end
-			end
-		end
-		return bestPart
+		if not currentTarget or not currentTarget.Parent then return nil end
+		local th = currentTarget:FindFirstChild("HumanoidRootPart")
+		local hum = currentTarget:FindFirstChild("Humanoid")
+		if th and hum and hum.Health > 0 then return th end
+		return nil
 	end
 
-	-- Move the actual OS mouse to the target's screen position. BF's
-	-- Mouse.Hit raycasts from the camera through the mouse pixel — so
-	-- moving the mouse to where the target renders makes directional
-	-- abilities aim at it. No hooks, no metatable manipulation; just
-	-- VirtualInputManager.SendMouseMoveEvent. Anti-cheat-safe.
-	--
-	-- If the target is offscreen, we briefly snap the camera to face
-	-- them first. Visually jarring but only happens for far-rear
-	-- targets, and the snap is instantaneous so it just looks like a
-	-- camera flick.
+	-- Move the OS mouse to the target's screen pixel. No camera snap —
+	-- the previous version tried to face offscreen targets by writing
+	-- Camera.CFrame, which rotated the character (BF locks character
+	-- orientation to camera) and fought the hover BodyGyro. Now: if
+	-- the target is offscreen, skip the aim. Ability still fires
+	-- (the keypress goes through) but uses whatever Mouse.Hit happens
+	-- to be at — usually fine because Z is often a buff/short range
+	-- and X/C/V are camera-relative.
 	local function _aimMouseAt(part)
 		if not part then return end
 		local cam = workspace.CurrentCamera
 		if not cam then return end
 		local screen, onScreen = cam:WorldToViewportPoint(part.Position)
-		if not onScreen then
-			cam.CFrame = CFrame.lookAt(cam.CFrame.Position, part.Position)
-			task.wait()  -- one frame for camera to update
-			screen = cam:WorldToViewportPoint(part.Position)
-		end
+		if not onScreen then return end  -- skip rather than camera-snap
 		VIM:SendMouseMoveEvent(screen.X, screen.Y, game)
 	end
 
