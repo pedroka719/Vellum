@@ -83,6 +83,8 @@ function Module.start(lib)
 		-- ability rotation
 		abilitySlots = { Z = false, X = false, C = false, V = false, F = false },
 		abilityCadence = 2.0,        -- sec between ability activations
+		abilityAimMobs   = true,     -- rotate HRP to face current mob before firing directional moves
+		abilityAimPlayers = false,   -- enable BF's built-in player auto-aim (AAIM attribute)
 
 		-- fruit sniper — auto-tween to dropped devil fruits and let
 		-- natural collision pickup grab them. Pure passive collection,
@@ -2120,91 +2122,103 @@ function Module.start(lib)
 	end
 
 	-- ═══════════════════════════ ABILITY ROTATION ═══════════════════════════
-	-- BF's ability protocol (from FruitClient decompiled source):
-	--   1. tool.RemoteEvent:FireServer(true)      — signals "activation start"
-	--   2. Write tool.MousePos.Value = targetPos   — target for position-based skills
-	--   3. tool.RemoteEvent:FireServer(targetPos)  — sends Vector3 target
-	-- OR for CFrame abilities:
-	--   3. tool.RemoteEvent:FireServer(CFrame)     — sends Mouse.Hit CFrame
-	-- The Holding BoolValue on the tool flags sustained activation.
-	-- RemoteFunction on the tool is for M1 combat, NOT abilities.
+	-- BF binds Z/X/C/V/F to a ContextActionService handler defined in
+	-- ReplicatedStorage.FruitClient ("casFunc"). It exposes the handler as
+	-- _G.casFunc once a fruit is equipped — see FruitClient line 951.
+	-- We invoke it the same way MobileUIController does (line 604):
+	--   _G.casFunc("DevilFruit", Enum.UserInputState.Begin, fakeInput, KeyCode)
+	-- This skips VirtualInputManager entirely (no UI-focus side effects, no
+	-- Mouse.Hit dependency, no character teleport on Z-dash).
+	--
+	-- For directional aim:
+	--   - mob target: rotate HRP to face current enemy BEFORE firing,
+	--     so the look-vector points at the mob. Restore AutoRotate after.
+	--   - player target: set LocalPlayer:SetAttribute("AAIM", true) — the
+	--     game's own auto-aim picks the nearest player automatically.
+	--
+	-- Sword/race skills don't bind through casFunc; they use their own
+	-- per-tool handlers. Auto-abilities here only covers fruit Z/X/C/V/F.
 	local SLOT_NAMES = { "Z", "X", "C", "V", "F" }
+	local KEYCODE = {
+		Z = Enum.KeyCode.Z, X = Enum.KeyCode.X,
+		C = Enum.KeyCode.C, V = Enum.KeyCode.V,
+		F = Enum.KeyCode.F,
+	}
+
+	local function fireAbility(slot)
+		local fn = rawget(_G, "casFunc")
+		if type(fn) ~= "function" then return false end
+		local kc = KEYCODE[slot]
+		if not kc then return false end
+		local input = {
+			UserInputState = Enum.UserInputState.Begin,
+			UserInputType  = Enum.UserInputType.Keyboard,
+			KeyCode        = kc,
+		}
+		local ok = pcall(fn, "DevilFruit", Enum.UserInputState.Begin, input, kc)
+		return ok
+	end
 
 	local function abilityRotationTick()
 		if not cfg.autoFarm then return end
 		local ch = LocalPlayer.Character
-		local tool = ch and ch:FindFirstChildOfClass("Tool")
-		if not tool then return end
+		local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+		if not hrp then return end
 
-		local re = tool:FindFirstChild("RemoteEvent")
-		if not re or not re:IsA("RemoteEvent") then return end
-		if re.Name == "EquipEvent" then
-			for _, c in ipairs(tool:GetChildren()) do
-				if c:IsA("RemoteEvent") and c.Name ~= "EquipEvent" and c.Name ~= "LegacyRemoteEvent" then
-					re = c
-					break
-				end
-			end
-		end
+		-- Need a fruit equipped for casFunc to be bound. If the player has
+		-- no fruit, _G.casFunc won't exist and we silently no-op.
+		if type(rawget(_G, "casFunc")) ~= "function" then return end
 
-		local legacyRe = tool:FindFirstChild("LegacyRemoteEvent")
-		local targetRe = legacyRe and legacyRe:IsA("RemoteEvent") and legacyRe or re
+		-- Sync player auto-aim with our config every tick so toggling the UI
+		-- mirrors immediately. AAIM is the in-game flag the skill handler reads.
+		LocalPlayer:SetAttribute("AAIM", cfg.abilityAimPlayers and true or false)
 
-		local mousePosVal = tool:FindFirstChild("MousePos")
-		local holdingVal = tool:FindFirstChild("Holding")
-
-		local targetPos
-		local enemy = currentTarget
-		if enemy and enemy.Parent then
-			local ehrp = enemy:FindFirstChild("HumanoidRootPart")
-			targetPos = ehrp and ehrp.Position
-		end
-		if not targetPos then
-			local hrp = ch:FindFirstChild("HumanoidRootPart")
-			targetPos = hrp and (hrp.Position + (hrp.CFrame.LookVector * 50))
-		end
-		if not targetPos then return end
-
+		-- Honor on-screen cooldown indicators when available.
 		local canFire = {}
 		local pg = LocalPlayer:FindFirstChild("PlayerGui")
 		local mainGui = pg and pg:FindFirstChild("Main")
 		local skillsGui = mainGui and mainGui:FindFirstChild("Skills")
 		local combatFrame = skillsGui and skillsGui:FindFirstChild("Combat")
-		if combatFrame then
-			for _, slot in ipairs(SLOT_NAMES) do
-				if cfg.abilitySlots[slot] then
+		for _, slot in ipairs(SLOT_NAMES) do
+			if cfg.abilitySlots[slot] then
+				local ready = true
+				if combatFrame then
 					local slotFrame = combatFrame:FindFirstChild(slot)
-					if slotFrame then
-						local cdFrame = slotFrame:FindFirstChild("Cooldown")
-						if not cdFrame or not cdFrame.Visible then
-							table.insert(canFire, slot)
-						end
-					else
-						table.insert(canFire, slot)
-					end
+					local cdFrame = slotFrame and slotFrame:FindFirstChild("Cooldown")
+					if cdFrame and cdFrame.Visible then ready = false end
 				end
+				if ready then table.insert(canFire, slot) end
 			end
-		else
-			for _, slot in ipairs(SLOT_NAMES) do
-				if cfg.abilitySlots[slot] then
-					table.insert(canFire, slot)
-				end
-			end
+		end
+		if #canFire == 0 then return end
+
+		-- Aim: rotate HRP to face the current mob if we have one. casFunc's
+		-- target resolution for non-player skills uses character look vector
+		-- (focusAdjust in CombatController), so facing the mob = ability lands
+		-- on the mob. Skipped when abilityAimMobs is off so the user can
+		-- self-aim if they prefer.
+		local mob = currentTarget
+		local mobHrp = mob and mob.Parent and mob:FindFirstChild("HumanoidRootPart")
+		local restoreAuto
+		if cfg.abilityAimMobs and mobHrp then
+			restoreAuto = hrp.CFrame
+			local hum = ch:FindFirstChildOfClass("Humanoid")
+			if hum then hum.AutoRotate = false end
+			local p = hrp.Position
+			local t = Vector3.new(mobHrp.Position.X, p.Y, mobHrp.Position.Z)
+			hrp.CFrame = CFrame.new(p, t)
 		end
 
 		for _, slot in ipairs(canFire) do
-			safe(function()
-				if mousePosVal and mousePosVal:IsA("Vector3Value") then
-					mousePosVal.Value = targetPos
-				end
-				targetRe:FireServer(true)
-				targetRe:FireServer(targetPos)
-				if holdingVal and holdingVal:IsA("BoolValue") then
-					holdingVal.Value = true
-					task.delay(0.15, function() holdingVal.Value = false end)
-				end
-			end)
+			safe(function() fireAbility(slot) end)
 			task.wait(0.05)
+		end
+
+		if restoreAuto then
+			task.delay(0.2, function()
+				local hum = ch:FindFirstChildOfClass("Humanoid")
+				if hum then hum.AutoRotate = true end
+			end)
 		end
 	end
 
@@ -2611,6 +2625,12 @@ function Module.start(lib)
 		function(v) cfg.abilityCadence = v end,
 		{ min = 0.5, max = 10, step = 0.1,
 		  format = function(v) return string.format("%.1fs", v) end })
+	ui.toggleRow(farm, "Aim at mobs (rotate to face)",
+		function() return cfg.abilityAimMobs end,
+		function(v) cfg.abilityAimMobs = v end)
+	ui.toggleRow(farm, "Auto-aim players (PvP)",
+		function() return cfg.abilityAimPlayers end,
+		function(v) cfg.abilityAimPlayers = v end)
 
 	ui.sectionLabel(farm, "TARGET FILTER")
 	ui.sliderRow(farm, "Min enemy level",
