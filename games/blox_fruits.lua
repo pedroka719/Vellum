@@ -445,21 +445,56 @@ function Module.start(lib)
 		{ name = "Prison",          pos = Vector3.new(4875.3, 5.7, 734.9),     lvlRange = "Lv 250-324" },
 		{ name = "Colosseum",       pos = Vector3.new(-11.3, 29.3, 2771.5),    lvlRange = "PvP"        },
 		{ name = "Magma Village",   pos = Vector3.new(-5247.7, 12.9, 8504.9),  lvlRange = "Lv 325-449" },
-		{ name = "Underwater City", pos = Vector3.new(61165.2, 0.2, 1897.4),   lvlRange = "Lv 450-624", portal = "UnderwaterExit" },
+		{ name = "Underwater City", pos = Vector3.new(61165.2, 0.2, 1897.4),   lvlRange = "Lv 450-624" },
 		{ name = "Fountain City",   pos = Vector3.new(5127.1, 59.5, 4105.4),   lvlRange = "Lv 625-749" },
 	}
 
 	local ISLAND_BY_NAME = {}
 	for _, i in ipairs(ISLANDS) do ISLAND_BY_NAME[i.name] = i end
 
-	-- BF portal pads. Stand on/near the pad position, fire CommF_:requestEntrance
-	-- with that Vector3, and the server completes the warp through the linked
-	-- portal — same path the Portal Fruit / Sea Portal uses. Server-authorized,
-	-- no rollback. The pad is where the PLAYER must be; destination is the
-	-- island's pos in ISLANDS above.
+	-- BF's cross-sea portal lives at workspace.Map.TeleportSpawn — two paired
+	-- BaseParts with server-side Touched handlers. Stepping on the entry part
+	-- yanks the player to the exit part via SetPrimaryPartCFrame on the server,
+	-- which the anti-cheat trusts because the *server* did the move. No remote
+	-- to fire — touch is the protocol.
+	-- The old code path fired CommF_:requestEntrance which never actually
+	-- triggered the TP (verified via remote spy — that handler doesn't exist
+	-- for this portal). Result: tween fell through to a 60K-stud cross-sea
+	-- crawl that takes ~10 minutes.
+	-- Coords are live-looked-up from workspace.Map.TeleportSpawn when present;
+	-- the hardcoded fallbacks below were captured from a 2026-06 probe and act
+	-- as a safety net if BF moves the parts.
+	-- Naming is counterintuitive in the live game data:
+	--   "Entrance"      = Sea 1 trigger Part   (HAS TouchInterest)
+	--   "Exit"          = Sea 2 trigger Part   (HAS TouchInterest, doubles as the return portal)
+	--   "EntrancePoint" = Sea 2 landing marker (NO TouchInterest, just a coord)
+	--   "ExitPoint"     = Sea 1 landing marker (NO TouchInterest, just a coord)
+	-- Verified via live probe — touching EntrancePoint/ExitPoint does nothing.
+	local SEA_PORTAL_FALLBACK = {
+		sea1to2 = { entry = Vector3.new(4050, -2, -1814), exit = Vector3.new(61163, 11, 1819) },
+		sea2to1 = { entry = Vector3.new(61170, -2, 1952), exit = Vector3.new(3864, 6, -1927)  },
+	}
+	local function _liveSeaPortal()
+		local tp = workspace:FindFirstChild("Map") and workspace.Map:FindFirstChild("TeleportSpawn")
+		if not tp then return SEA_PORTAL_FALLBACK end
+		local function pos(n) local p = tp:FindFirstChild(n); return p and p:IsA("BasePart") and p.Position end
+		return {
+			sea1to2 = { entry = pos("Entrance")      or SEA_PORTAL_FALLBACK.sea1to2.entry,
+			            exit  = pos("EntrancePoint") or SEA_PORTAL_FALLBACK.sea1to2.exit  },
+			sea2to1 = { entry = pos("Exit")          or SEA_PORTAL_FALLBACK.sea2to1.entry,
+			            exit  = pos("ExitPoint")     or SEA_PORTAL_FALLBACK.sea2to1.exit  },
+		}
+	end
+	-- Sea 1 lives roughly in |X| < 30000; Sea 2 (Underwater City + Sea 2 islands)
+	-- sits at X ≈ 60000-62000. Z separates regions inside a sea but doesn't
+	-- straddle the sea boundary, so X-magnitude is the safest discriminator.
+	local function _whichSea(pos) return math.abs(pos.X) > 30000 and 2 or 1 end
+
+	-- Intra-Sea-1 sub-zone portals (sky pathway etc). Kept on the old CommF_
+	-- path because they're cheap to retry and the existing code handles
+	-- Skylands sub-zone arrival correctly.
 	local PORTAL_PADS = {
-		UnderwaterExit = Vector3.new(4050, -1, -1814),    -- surface pad → Underwater City
-		Sky3Exit       = Vector3.new(-4607, 874, -1667),  -- sky portal (Skylands variant)
+		Sky3Exit = Vector3.new(-4607, 874, -1667),  -- sky portal (Skylands variant)
 	}
 
 	-- Generic sub-zone discovery: returns the spawn centroid for a mob.
@@ -685,19 +720,79 @@ function Module.start(lib)
 		cfg.autoFarmLevel = false
 		_stopFlightFn()
 
-		-- Portal-fronted destination: tween to the pad, fire requestEntrance,
-		-- let the server finish the warp.
+		-- Cross-sea? Tween to the touch portal in our current sea, let the
+		-- server's Touched handler do the 60K-stud jump. ~1-2 seconds vs
+		-- ~10 minutes for a direct cross-sea tween.
+		--
+		-- The portal protocol (verified via live probe 2026-06):
+		--   1. Disable everything that moves HRP (farm/flight/sniper already
+		--      off above; also need to kill BodyMovers because Touched needs
+		--      our position to STICK on the trigger Part for a few frames).
+		--   2. Tween near the portal entry.
+		--   3. Spam-write hrp.CFrame to the trigger Part position for ~1.5s.
+		--      A single CFrame gets rolled back by anti-cheat before the
+		--      server sees us at the trigger; repeated writes force the
+		--      position to replicate. (Single-snap test took 4s with no
+		--      crossover; spammed test crossed in 552ms.)
+		--   4. The server's :Touched handler fires, CFrames us to the exit
+		--      landing marker on the other sea side.
+		--   5. Poll for the sea-index flip to confirm.
+		local playerSea = _whichSea(hrp.Position)
+		local destSea   = _whichSea(island.pos)
+		if playerSea ~= destSea then
+			local portals = _liveSeaPortal()
+			local portal  = (playerSea == 1) and portals.sea1to2 or portals.sea2to1
+
+			-- Get us within ~800 studs first so the spam-snap doesn't
+			-- trigger CheckTeleportGlitchFix.
+			if (hrp.Position - portal.entry).Magnitude > 800 then
+				_tweenHRPTo(hrp, portal.entry)
+			end
+
+			-- Kill BodyMovers so flight/dash residuals don't pull us off.
+			for _, c in ipairs(hrp:GetChildren()) do
+				if c:IsA("BodyMover") or c:IsA("BodyVelocity") or c:IsA("BodyPosition")
+				   or c:IsA("BodyGyro") or c:IsA("LinearVelocity") or c:IsA("AlignPosition")
+				   or c:IsA("VectorForce") then
+					pcall(function() c:Destroy() end)
+				end
+			end
+			local hum = ch:FindFirstChildOfClass("Humanoid")
+			if hum then hum.Sit = false; hum.PlatformStand = false end
+
+			-- Spam-snap on the trigger Part. Bail early on sea crossover.
+			local crossed = false
+			for i = 1, 30 do
+				pcall(function()
+					hrp.CFrame = CFrame.new(portal.entry)
+					hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+				end)
+				task.wait(0.05)
+				if _whichSea(hrp.Position) == destSea then crossed = true; break end
+			end
+			-- Final short poll if the snap loop finished without seeing the
+			-- crossover (touched event may land between checks).
+			if not crossed then
+				local t0 = tick()
+				while tick() - t0 < 1.5 do
+					task.wait(0.1)
+					if _whichSea(hrp.Position) == destSea then crossed = true; break end
+				end
+			end
+			-- Bump up a few studs at the exit so we don't immediately walk back
+			-- onto the return portal (Sea 2 trigger is ~70 studs from Sea 1 landing).
+			if crossed then
+				pcall(function() hrp.CFrame = hrp.CFrame + Vector3.new(0, 8, 0) end)
+			end
+		end
+
+		-- Intra-sea sub-zone portal (Skylands sky pathway etc).
 		if island.portal and PORTAL_PADS[island.portal] then
 			local padPos = PORTAL_PADS[island.portal]
 			_tweenHRPTo(hrp, padPos + Vector3.new(0, 4, 0))
 			safe(function() R.CommF_:InvokeServer("requestEntrance", padPos) end)
-			-- Bump up 50 studs so we don't immediately re-trigger the same pad
-			hrp.CFrame = hrp.CFrame + Vector3.new(0, 50, 0)
-			task.wait(1.5)  -- server completes portal warp
-
-			-- Post-portal sub-zone discovery is handled by autoFarmLevelLoop
-			-- (which knows the active quest mob). tpToIsland only places us at
-			-- the portal exit; the next farm tick scans live spawns and snaps.
+			pcall(function() hrp.CFrame = hrp.CFrame + Vector3.new(0, 50, 0) end)
+			task.wait(1.5)
 		else
 			local landingPos = island.pos + Vector3.new(0, 4, 0)
 			_tweenHRPTo(hrp, landingPos)
