@@ -2254,28 +2254,41 @@ function Module.start(lib)
 		return pcall(fn, "DevilFruit", Enum.UserInputState.Begin, input, kc)
 	end
 
-	-- Sword fire path: per the decompiled Bisento Tool LocalScript, sword skills fire by
-	--   1. tool.RemoteEvent:FireServer(targetPos)   — position target
-	--   2. tool.RemoteFunction:InvokeServer(slot)   — damage trigger (this is the key step
-	--      the previous protocol was missing). slot = "Z" or "X".
-	-- Most sword tools follow this pattern; ones that don't (Gravity Cane, etc.) will
-	-- silently fail the InvokeServer call without throwing.
+	-- Sword fire path — the FULL ritual matters. Verified via remote spy +
+	-- live damage test 2026-06 (Bisento Z dealt 423 dmg → killed a Fishman
+	-- Commando). The decompiled Bisento Tool LocalScript shows the move is
+	-- gated by tool.Holding.Value — the server requires the Hold-spam-release
+	-- sequence to register the swing, not just a one-shot FireServer+Invoke.
+	--
+	-- Sequence:
+	--   1. Holding.Value = true       (signals "key down")
+	--   2. MousePos.Value = target    (write target before position fires)
+	--   3. FireServer(target) x5 at 50ms  (server needs multiple position frames
+	--                                      to validate target — single fire gets
+	--                                      ignored as "no charge time")
+	--   4. Holding.Value = false      (signals "key released")
+	--   5. InvokeServer(slot)         (the actual damage trigger)
+	--   6. FireServer(false)          (cleanup signal — release follow-up)
 	local function fireToolAbility(slot, targetPos)
 		local ch = LocalPlayer.Character
 		local tool = ch and ch:FindFirstChildOfClass("Tool")
 		if not tool then return false end
 		local re = tool:FindFirstChild("RemoteEvent")
 		local rf = tool:FindFirstChild("RemoteFunction")
+		local mp = tool:FindFirstChild("MousePos")
+		local holding = tool:FindFirstChild("Holding")
 		if not (re and re:IsA("RemoteEvent") and rf and rf:IsA("RemoteFunction")) then
 			return false
 		end
-		-- MousePos sync (some skills read this directly).
-		local mp = tool:FindFirstChild("MousePos")
-		if mp and mp:IsA("Vector3Value") and targetPos then
-			mp.Value = targetPos
+		if holding and holding:IsA("BoolValue") then holding.Value = true end
+		if mp and mp:IsA("Vector3Value") and targetPos then mp.Value = targetPos end
+		for _ = 1, 5 do
+			pcall(function() re:FireServer(targetPos) end)
+			task.wait(0.05)
 		end
-		pcall(function() re:FireServer(targetPos) end)
+		if holding and holding:IsA("BoolValue") then holding.Value = false end
 		pcall(function() rf:InvokeServer(slot) end)
+		pcall(function() re:FireServer(false) end)
 		return true
 	end
 
