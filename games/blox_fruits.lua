@@ -2711,14 +2711,63 @@ function Module.start(lib)
 		end
 	end
 
-	-- Auto-unlock entry point — what to do when the user clicks "Unlock" on
-	-- a gated item. For LEVEL gates we engage Auto Farm Level with the
-	-- right level range and toast guidance. For BOSS / MASTERY / RACE /
-	-- QUEST gates we toast the manual path until we wire each up.
+	-- Boss → island mapping. Most named bosses live on the level-appropriate
+	-- island; this lets us hop there and let the auto-farm engage them.
+	local BOSS_ISLAND = {
+		["Saber Expert"]    = "Pirate Village",
+		["Fishman Lord"]    = "Underwater City",
+		["Yeti"]            = "Frozen Village",
+		["Magma Admiral"]   = "Magma Village",
+		["Vice Admiral"]    = "Marine Fortress",
+		["Warden"]          = "Prison",
+		["Chief Warden"]    = "Prison",
+		["Swan"]            = "Prison",
+		["Don Swan"]        = "Magma Village",
+		["Smoke Admiral"]   = "Marine Fortress",
+		["Gorilla King"]    = "Jungle",
+		["Chef"]            = "Pirate Village",
+		-- Sea events stay nil — caught by the fallback toast
+	}
+
+	-- Polling task that retries BuyItem every 30s until success OR the user
+	-- toggles auto-farm off. Each unlock spawns at most one of these so
+	-- back-to-back unlock clicks don't stack pollers.
+	local _unlockPollers = {}
+	local function _pollUntilBought(item, displayName)
+		if _unlockPollers[item] then return end
+		_unlockPollers[item] = true
+		task.spawn(function()
+			local deadline = tick() + 3600  -- 1hr max
+			while tick() < deadline and _running do
+				task.wait(30)
+				if not cfg.autoFarm and not cfg.autoFarmLevel then break end
+				local ok, res = pcall(function()
+					return R.CommF_:InvokeServer("BuyItem", item)
+				end)
+				if ok and (tostring(res) == "0" or tostring(res) == "1") then
+					Toast.show({
+						title = "Unlocked!",
+						body  = (displayName or item) .. " — auto-purchased",
+						kind  = "success", duration = 6,
+						key   = "unlock:done:" .. item,
+					})
+					break
+				end
+			end
+			_unlockPollers[item] = nil
+		end)
+	end
+
+	-- Auto-unlock router. Branches on prereq.kind and dispatches to the
+	-- right pipeline. All five paths spawn _pollUntilBought so the moment
+	-- the server stops rejecting BuyItem, the item lands in the backpack
+	-- without the user needing to manually re-click.
 	local function startUnlock(item, displayName, prereq)
 		if not prereq then return end
-		if prereq.kind == "level" then
-			-- Set min/max around the target level and engage autoFarmLevel
+		local kind = prereq.kind
+
+		-- LEVEL — set farmLevel range, engage autoFarmLevel, poll
+		if kind == "level" then
 			cfg.farmLevelMin   = math.max(0, (prereq.value or 0) - 25)
 			cfg.farmLevelMax   = math.max(prereq.value or 0, 9999)
 			cfg.skipBossQuests = true
@@ -2730,10 +2779,109 @@ function Module.start(lib)
 				kind  = "info", duration = 5,
 				key   = "unlock:" .. item,
 			})
+			_pollUntilBought(item, displayName)
 			return
 		end
-		-- Stub paths — surface what we'd need to automate so the user can
-		-- run it manually for now. Hooks land here per-item over time.
+
+		-- BOSS — override farm target to the boss, TP to its island, retry buy
+		if kind == "boss" then
+			local boss = prereq.target
+			local island = BOSS_ISLAND[boss]
+			if not island then
+				Toast.show({
+					title = "Boss unlock — manual",
+					body  = boss .. " spawns randomly (sea event). Watch for spawn.",
+					kind  = "warn", duration = 6,
+					key   = "unlock:manual:" .. item,
+				})
+				return
+			end
+			-- Simple farm mode targeting the boss specifically. The autoFarm
+			-- loop will pick the boss as soon as it spawns in workspace.Enemies.
+			cfg.autoFarmLevel  = false
+			cfg.farmTargetName = boss
+			cfg.farmLevelMin   = 1
+			cfg.farmLevelMax   = 9999
+			cfg.autoFarm       = true
+			safe(function() tpToIsland(island) end)
+			Toast.show({
+				title = "Boss hunt engaged",
+				body  = "Hunting " .. boss .. " on " .. island .. " for " .. (displayName or item),
+				kind  = "info", duration = 6,
+				key   = "unlock:" .. item,
+			})
+			_pollUntilBought(item, displayName)
+			return
+		end
+
+		-- QUEST — already in our atlas (Pole = SkyQuest t2). Just engage
+		-- autoFarmLevel; the existing pickQuest routes us to the right tier.
+		if kind == "quest" then
+			cfg.autoFarmLevel = true
+			cfg.autoFarm      = true
+			cfg.skipBossQuests = false  -- the quest itself might be the gate
+			Toast.show({
+				title = "Auto-quest engaged",
+				body  = (displayName or item) .. "  •  " .. (prereq.hint or "running atlas"),
+				kind  = "info", duration = 5,
+				key   = "unlock:" .. item,
+			})
+			_pollUntilBought(item, displayName)
+			return
+		end
+
+		-- MASTERY — pin the prereq weapon style so every kill builds mastery
+		-- toward the threshold. Server tracks mastery on the equipped Tool;
+		-- we can't read the exact number client-side without inspecting the
+		-- Tool's attributes per-respawn (varies by weapon), but pinning the
+		-- style + letting the farm run + polling BuyItem is the working
+		-- path. Once mastery hits the gate, server accepts the buy.
+		if kind == "mastery" then
+			cfg.selectedWeapon = prereq.target  -- ensureWeaponEquipped uses this
+			cfg.autoFarm       = true
+			Toast.show({
+				title = "Mastery unlock engaged",
+				body  = "Pinned " .. prereq.target .. " — farm to grow mastery, will auto-buy " .. (displayName or item),
+				kind  = "info", duration = 6,
+				key   = "unlock:" .. item,
+			})
+			_pollUntilBought(item, displayName)
+			return
+		end
+
+		-- FRAGMENT — Fragments drop from raids + bosses + sea events. Our
+		-- best automation today is to keep the user farming high-level
+		-- quest mobs (which sometimes drop Fragments) and the boss-skip
+		-- filter OFF so bosses become viable. Real fragment farming
+		-- (raids, sea events) lands in a future commit.
+		if kind == "fragment" then
+			cfg.skipBossQuests = false
+			cfg.autoFarmLevel  = true
+			cfg.autoFarm       = true
+			Toast.show({
+				title = "Fragment grind engaged",
+				body  = (displayName or item) .. "  •  Need " .. tostring(prereq.value) .. " Fragments. Bosses & sea events drop them.",
+				kind  = "warn", duration = 7,
+				key   = "unlock:" .. item,
+			})
+			_pollUntilBought(item, displayName)
+			return
+		end
+
+		-- RACE — multi-stage chain (V1 → V2 → V3 → V4). Each stage is its
+		-- own boss/quest sequence. Stubbed for now — race automation lands
+		-- as its own dedicated tab once we have the recon for each stage.
+		if kind == "race" then
+			Toast.show({
+				title = "Race unlock — manual",
+				body  = "Race upgrades are multi-stage. Manual for now: " .. (prereq.hint or ""),
+				kind  = "warn", duration = 7,
+				key   = "unlock:manual:" .. item,
+			})
+			return
+		end
+
+		-- Unknown prereq — surface what we know so the user can act manually
 		Toast.show({
 			title = "Manual unlock",
 			body  = (displayName or item) .. "  •  " .. (prereq.hint or "see BF wiki"),
