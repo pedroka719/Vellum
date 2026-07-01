@@ -2174,70 +2174,89 @@ function Module.start(lib)
 	end
 
 	-- ═══════════════════════════ ABILITY ROTATION ═══════════════════════════
-	-- BF's ability protocol, read straight out of the equipped tool's own
-	-- LocalScript (Bisento.Tool, the KeyCode.Z handler) and verified live —
-	-- FireServer(pos) + InvokeServer("Z") dealt 2160 dmg in a single hit:
-	--   1. tool.RemoteEvent:FireServer(targetPos)  — the same Vector3 as Mouse.Hit.p
-	--   2. tool.RemoteFunction:InvokeServer(key)    — THE actual skill trigger
-	-- The old code fired the RemoteEvent but never invoked the RemoteFunction,
-	-- so nothing ever cast. InvokeServer(key) is the whole ballgame — not
-	-- "M1 only" as a previous note wrongly claimed.
+	-- Auto-cast the weapon's Z/X/C/V/F skills. Reverse-engineering the remotes
+	-- was a dead end: proven live, a bare tool.RemoteFunction:InvokeServer(key)
+	-- — even wrapped in the full Holding + repeated RemoteEvent charge — dealt
+	-- ZERO damage and played no animation. The server only accepts a skill
+	-- through the tool's OWN key handler, so we trigger it the way a real player
+	-- does: a VirtualInputManager key press. Aim comes from the game's Mouse
+	-- module (ReplicatedStorage.Mouse) — its `.Hit` is a settable CFrame the
+	-- handler re-reads each frame, so we pin it onto the target for the cast.
+	-- Verified live: this casts Wind Breaker / Quake Sphere and killed a Galley
+	-- Captain from a farm hover, no anti-cheat kick. (If kicks ever show up,
+	-- this is the block to revert — the remote path never worked anyway.)
 	local SLOT_NAMES = { "Z", "X", "C", "V", "F" }
+	local VIM = game:GetService("VirtualInputManager")
+	local _mouseMod
+	local function getMouse()
+		if _mouseMod == nil then
+			local mod = game:GetService("ReplicatedStorage"):FindFirstChild("Mouse")
+			local ok, m = pcall(require, mod)
+			_mouseMod = (ok and m) or false
+		end
+		return _mouseMod or nil
+	end
 
-	-- Where to aim: the live farm target if we have one, otherwise the closest
-	-- breathing enemy within reach. Returns nil when there's nothing to hit so
-	-- we don't burn cooldowns casting into empty air.
-	local function abilityTargetPos(ch)
+	-- Aim target: the live farm target if we have one, else the closest
+	-- breathing enemy in reach. Returns the enemy HRP (not a static point) so
+	-- the aim tracks it as it moves, or nil when there's nothing to hit — no
+	-- casting into empty water and burning cooldowns.
+	local function abilityTargetPart(ch)
 		local enemy = currentTarget
 		if enemy and enemy.Parent then
 			local ehrp = enemy:FindFirstChild("HumanoidRootPart")
-			if ehrp then return ehrp.Position end
+			if ehrp then return ehrp end
 		end
 		local hrp = ch:FindFirstChild("HumanoidRootPart")
 		local enemies = workspace:FindFirstChild("Enemies")
 		if not (hrp and enemies) then return nil end
-		local bestPos, bestD
+		local bestPart, bestD
 		for _, m in ipairs(enemies:GetChildren()) do
 			local ehrp = m:FindFirstChild("HumanoidRootPart")
 			local hum = m:FindFirstChildOfClass("Humanoid")
 			if ehrp and hum and hum.Health > 0 then
 				local d = (ehrp.Position - hrp.Position).Magnitude
-				if d <= 250 and (not bestD or d < bestD) then bestD = d; bestPos = ehrp.Position end
+				if d <= 250 and (not bestD or d < bestD) then bestD = d; bestPart = ehrp end
 			end
 		end
-		return bestPos
+		return bestPart
+	end
+
+	-- One cast: pin the mouse aim on the (moving) target for the whole cast, tap
+	-- the key. The tool's charge handler re-reads Mouse.Hit every frame, so we
+	-- keep writing it until the handler's had time to fire and release.
+	local function castSkill(mouse, slot, targetPart)
+		local casting = true
+		task.spawn(function()
+			while casting do
+				if targetPart and targetPart.Parent then
+					mouse.Hit = CFrame.new(targetPart.Position)
+				end
+				RunService.Heartbeat:Wait()
+			end
+		end)
+		VIM:SendKeyEvent(true, Enum.KeyCode[slot], false, game)
+		task.wait(0.06)
+		VIM:SendKeyEvent(false, Enum.KeyCode[slot], false, game)
+		task.wait(0.26)
+		casting = false
 	end
 
 	local function abilityRotationTick()
 		local ch = LocalPlayer.Character
 		local tool = ch and ch:FindFirstChildOfClass("Tool")
 		if not tool then return end
+		local mouse = getMouse()
+		if not mouse then return end
 
-		-- Resolve the tool's real activation RemoteEvent. Some tools name the
-		-- primary event literally "RemoteEvent"; others hide it behind EquipEvent.
-		local re = tool:FindFirstChild("RemoteEvent")
-		if re and re.Name == "EquipEvent" then re = nil end
-		if not (re and re:IsA("RemoteEvent")) then
-			for _, c in ipairs(tool:GetChildren()) do
-				if c:IsA("RemoteEvent") and c.Name ~= "EquipEvent" and c.Name ~= "LegacyRemoteEvent" then
-					re = c
-					break
-				end
-			end
-		end
-		local rf = tool:FindFirstChild("RemoteFunction")
-		if not (re and rf and rf:IsA("RemoteFunction")) then return end
+		local targetPart = abilityTargetPart(ch)
+		if not targetPart then return end
 
-		local targetPos = abilityTargetPos(ch)
-		if not targetPos then return end
-
-		-- Only fire slots the equipped weapon actually HAS. BF lists a weapon's
-		-- real moves under PlayerGui.Main.Skills.<toolName> (verified live: the
-		-- Bisento frame holds exactly Z and X). Without this, turning on all
-		-- five toggles would spray InvokeServer("C"/"V"/"F") at a two-skill
-		-- weapon every tick — harmless (the server no-ops unknown keys) but
-		-- pointless remote spam. If we can't find the frame (unusual weapon,
-		-- HUD not built yet) we fall back to firing whatever the user enabled.
+		-- Only cast slots this weapon actually HAS. BF lists a weapon's real
+		-- moves under PlayerGui.Main.Skills.<toolName> (verified live: Bisento →
+		-- Z, X). So all five toggles on a two-skill weapon won't tap keys that do
+		-- nothing. No frame found (odd weapon / HUD not built) → cast whatever's
+		-- enabled.
 		local hasSlot
 		local pg = LocalPlayer:FindFirstChild("PlayerGui")
 		local main = pg and pg:FindFirstChild("Main")
@@ -2250,18 +2269,12 @@ function Module.start(lib)
 			end
 		end
 
-		-- Fire the way the tool's own key handler does. No HRP CFrame writes on
-		-- purpose — the anti-cheat flags concurrent CFrame + FireServer, never
-		-- the fire itself. On-cooldown fires are a harmless server no-op, so we
-		-- let the server gate cadence rather than parsing the (unreliable)
-		-- cooldown UI.
+		-- Cast sequentially — each key press drives the tool's own handler
+		-- (animation + charge + release). On-cooldown taps are harmless no-ops;
+		-- the .Cooldown HUD isn't a readable signal, so we let the game gate it.
 		for _, slot in ipairs(SLOT_NAMES) do
 			if cfg.abilitySlots[slot] and (not hasSlot or hasSlot[slot]) then
-				safe(function()
-					re:FireServer(targetPos)
-					rf:InvokeServer(slot)
-				end)
-				task.wait(0.05)
+				safe(function() castSkill(mouse, slot, targetPart) end)
 			end
 		end
 	end
