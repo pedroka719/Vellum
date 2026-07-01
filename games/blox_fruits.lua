@@ -1634,38 +1634,82 @@ function Module.start(lib)
 		return lvl and lvl.Value or nil
 	end
 
-	-- BuyItem return codes, straight from the decompiled shop dialogue:
-	--   1 = purchased, 0 = not enough Beli, 2 = already own, anything else =
-	-- unavailable/gone. Returns the number, or nil if the remote itself errored.
-	-- The old code treated 0 (broke!) as success and 2 (owned) as failure —
-	-- that's why "Auto-unlock Buso" span forever on an account that owned it.
-	local function _buyItemCode(item)
-		local ok, res = pcall(function()
-			return R.CommF_:InvokeServer("BuyItem", item)
-		end)
-		if not ok then return nil end
-		return tonumber(res)
+	-- ─── purchase dispatcher ───────────────────────────────────────────────
+	-- BF does NOT buy everything through BuyItem. Verified live via the shop
+	-- dialogues + the CommF_ check variant:
+	--   weapons / fruits / cosmetics → BuyItem(name)    1 bought · 0 broke · 2 own
+	--   Haki                          → BuyHaki(name)    (same codes)
+	--   boats                         → BuyBoat(name)    (same codes)
+	--   fighting styles               → Buy<Style>()     one remote per style;
+	--       Buy<Style>(true) is a NON-destructive ownership check (1 = own).
+	-- BuyItem returns a GARBAGE "2 (already own)" for style names it doesn't
+	-- handle — which is exactly why buying / auto-unlocking a fight style used to
+	-- report a false "Already owned". Names below are the ones whose Buy<Style>
+	-- remote actually answered live; everything else falls through to BuyItem.
+	local BUY_SPECS = {
+		["Black Leg"]       = { style = "BuyBlackLeg" },
+		["Electro"]         = { style = "BuyElectro" },
+		["Fishman Karate"]  = { style = "BuyFishmanKarate" },
+		["Dragon Talon"]    = { style = "BuyDragonTalon" },
+		["Death Step"]      = { style = "BuyDeathStep" },
+		["Sharkman Karate"] = { style = "BuySharkmanKarate" },
+		["Electric Claw"]   = { style = "BuyElectricClaw" },
+		["Superhuman"]      = { style = "BuySuperhuman" },
+		["Godhuman"]        = { style = "BuyGodhuman" },
+		["Sanguine Art"]    = { style = "BuySanguineArt" },
+		["Buso"]            = { haki = "Buso" },
+		["Observation"]     = { haki = "Observation" },
+		["Rowboat"]  = { boat = true }, ["Plank Raft"]  = { boat = true },
+		["Brigade"]  = { boat = true }, ["Lantern Boat"] = { boat = true },
+		["The Swan"] = { boat = true },
+	}
+
+	-- Non-destructive check: does the player already know this fighting style?
+	local function _styleOwned(cmd)
+		local ok, res = pcall(function() return R.CommF_:InvokeServer(cmd, true) end)
+		return ok and res == 1
+	end
+
+	-- Try to acquire `item` through the right remote. This WILL purchase when
+	-- eligible — that's the point. Returns: "owned" | "bought" | "broke" |
+	-- "locked" | "err".
+	local function _purchase(item)
+		local b = BUY_SPECS[item]
+		if b and b.style then
+			if _styleOwned(b.style) then return "owned" end
+			local ok, res = pcall(function() return R.CommF_:InvokeServer(b.style) end)
+			if not ok then return "err" end
+			if _styleOwned(b.style) then return "bought" end
+			return (tonumber(res) == 0) and "broke" or "locked"
+		end
+		local cmd, arg
+		if b and b.haki then cmd, arg = "BuyHaki", b.haki
+		elseif b and b.boat then cmd, arg = "BuyBoat", item
+		else cmd, arg = "BuyItem", item end
+		local ok, res = pcall(function() return R.CommF_:InvokeServer(cmd, arg) end)
+		if not ok then return "err" end
+		res = tonumber(res)
+		if res == 1 then return "bought"
+		elseif res == 2 then return "owned"
+		elseif res == 0 then return "broke"
+		else return "locked" end
 	end
 
 	local function shopBuy(npcKey, item, displayName)
+		local name = displayName or item
+		Toast.show({ title = "Buying", body = name, kind = "info", duration = 2, key = "shop:" .. item })
+		local r = _purchase(item)
+		local ok = (r == "bought" or r == "owned")
+		local tail = (r == "owned") and "  •  already owned"
+			or (r == "broke") and "  •  not enough Beli"
+			or (r == "locked") and "  •  requirements not met"
+			or (r == "err") and "  •  couldn't reach the shop" or ""
 		Toast.show({
-			title = "Buying", body = (displayName or item),
-			kind = "info", duration = 2, key = "shop:" .. item,
+			title = ok and "Bought" or "Buy failed",
+			body  = name .. tail,
+			kind  = ok and "success" or "warn", duration = 4, key = "shop:done:" .. item,
 		})
-		local code = _buyItemCode(item)
-		local success = (code == 1 or code == 2)
-		local body
-		if code == 1 then     body = displayName or item
-		elseif code == 2 then body = (displayName or item) .. "  •  already owned"
-		elseif code == 0 then body = (displayName or item) .. "  •  not enough Beli"
-		else                  body = (displayName or item) .. "  •  locked / unavailable" end
-		Toast.show({
-			title = success and "Bought" or "Buy failed",
-			body  = body,
-			kind  = success and "success" or "warn", duration = 4,
-			key   = "shop:done:" .. item,
-		})
-		return success
+		return ok
 	end
 
 	-- Live dealer poll — deliberately FAST (~2s) so a snipe fires the instant a
@@ -2930,11 +2974,11 @@ function Module.start(lib)
 				if gap > 0 then task.wait(gap) end
 				gap = 30
 				if not _unlockPollers[item] then break end  -- cancelled
-				local code = _buyItemCode(item)
-				if code == 1 or code == 2 then
+				local r = _purchase(item)
+				if r == "bought" or r == "owned" then
 					Toast.show({
 						title = "Unlocked!",
-						body  = (displayName or item) .. (code == 2 and " — already owned" or " — auto-purchased"),
+						body  = (displayName or item) .. (r == "owned" and " — already owned" or " — auto-purchased"),
 						kind  = "success", duration = 6,
 						key   = "unlock:done:" .. item,
 					})
@@ -2983,9 +3027,9 @@ function Module.start(lib)
 	-- reliable "done" signal for every gate kind. One goal at a time — starting
 	-- an unlock clears any other in flight so the farm isn't torn in two.
 	local function startUnlock(item, displayName, prereq)
-		local code = _buyItemCode(item)
-		if code == 1 or code == 2 then
-			Toast.show({ title = code == 2 and "Already owned" or "Purchased!",
+		local r = _purchase(item)
+		if r == "bought" or r == "owned" then
+			Toast.show({ title = r == "owned" and "Already owned" or "Purchased!",
 				body = displayName or item, kind = "success", duration = 4,
 				key = "unlock:done:" .. item })
 			return
@@ -3078,16 +3122,21 @@ function Module.start(lib)
 		{ item = "Acidum Rifle",      npc = "AdvancedWeaponDealer", prereq = {kind="boss",  target="Fishman Lord", hint="Defeat Fishman Lord"} },
 	})
 
+	-- Names MUST match BUY_SPECS (they double as the Buy<Style> remote key).
+	-- Base styles are level/Beli gates; advanced ones gate on mastery — the
+	-- resolver pins Melee and grinds, and the server's own check lets the buy
+	-- through only when you truly qualify (so no false "unlocked").
 	renderShopSection(shopTab, "FIGHT STYLES", "Learn", {
-		{ item = "Black Leg",       npc = "AbilityTeacher",     prereq = {kind="level",    value=30,  hint="Lv 30 + 50k Beli"} },
-		{ item = "Dark Step",       npc = "DarkStepTeacher",    prereq = {kind="level",    value=75,  hint="Lv 75 + 50k Beli"} },
-		{ item = "Electro",         npc = "AbilityTeacher",     prereq = {kind="fragment", value=350, hint="350 Fragments (Skylands)"} },
-		{ item = "Fishman Karate",  npc = "AbilityTeacher",     prereq = {kind="level",    value=250, hint="Lv 250 + 750k Beli"} },
-		{ item = "Dragon Claw",     npc = "AbilityTeacher",     prereq = {kind="quest",    target="random gacha", hint="Gacha unlock + 1.5k Fragments"} },
-		{ item = "Death Step",      npc = "AbilityTeacher",     prereq = {kind="mastery",  target="Black Leg", value=400, hint="Black Leg M400 + 950k Beli"} },
-		{ item = "Superhuman",      npc = "AbilityTeacher",     prereq = {kind="mastery",  target="all 4 base styles", hint="All base styles M400 + 1.5M Beli"} },
-		{ item = "Sharkman Karate", npc = "WaterKungFuTeacher", prereq = {kind="mastery",  target="Fishman Karate", value=400, hint="Fishman Karate M400 + 2.5M Beli"} },
-		{ item = "Water Kung-Fu",   npc = "WaterKungFuTeacher", prereq = {kind="level",    value=300, hint="Lv 300 + 2.5M Beli"} },
+		{ item = "Black Leg",       npc = "AbilityTeacher", prereq = {kind="level",   value=30, hint="Lv 30 + 50k Beli"} },
+		{ item = "Electro",         npc = "AbilityTeacher", prereq = {kind="level",   value=1,  hint="500k Beli (Jungle)"} },
+		{ item = "Fishman Karate",  npc = "AbilityTeacher", prereq = {kind="level",   value=1,  hint="750k Beli (Underwater)"} },
+		{ item = "Dragon Talon",    npc = "AbilityTeacher", prereq = {kind="mastery", target="Melee", value=400, hint="Death Step + Superhuman M400"} },
+		{ item = "Death Step",      npc = "AbilityTeacher", prereq = {kind="mastery", target="Melee", value=400, hint="Black Leg M400 + 950k Beli"} },
+		{ item = "Electric Claw",   npc = "AbilityTeacher", prereq = {kind="mastery", target="Melee", value=400, hint="Electro M400 + 1.8M Beli"} },
+		{ item = "Sharkman Karate", npc = "AbilityTeacher", prereq = {kind="mastery", target="Melee", value=400, hint="Fishman Karate M400 + 2.5M Beli"} },
+		{ item = "Superhuman",      npc = "AbilityTeacher", prereq = {kind="mastery", target="Melee", value=400, hint="4 base styles M400 + 3M Beli"} },
+		{ item = "Godhuman",        npc = "AbilityTeacher", prereq = {kind="mastery", target="Melee", value=400, hint="4 advanced styles M400 + 20M Beli"} },
+		{ item = "Sanguine Art",    npc = "AbilityTeacher", prereq = {kind="mastery", target="Melee", value=400, hint="Godhuman + CDK M400 + 25M Beli"} },
 	})
 
 	ui.sectionLabel(shopTab, "HAKI")
