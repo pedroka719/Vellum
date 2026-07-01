@@ -366,8 +366,17 @@ function Module.start(lib)
 		-- showed manual tick invocation deals 588 dmg, but the internal loop
 		-- somehow never ticks). This guarantees abilities fire during autofarm.
 		if _fireAbilitiesInline and (os.clock() - _lastAbilityFire) >= (cfg.abilityCadence or 2) then
-			_lastAbilityFire = os.clock()
-			safe(function() _fireAbilitiesInline(enemy) end)
+			local anyOn = false
+			for _, s in ipairs({"Z","X","C","V","F"}) do
+				if cfg.abilitySlots[s] then anyOn = true; break end
+			end
+			if anyOn then
+				_lastAbilityFire = os.clock()
+				safe(function() _fireAbilitiesInline(enemy) end)
+				if getgenv().VellumBF and getgenv().VellumBF.diag then
+					warn("[Vellum] ability tick fired via attackOnce; target=" .. tostring(enemy and enemy.Name))
+				end
+			end
 		end
 		return true
 	end
@@ -2209,57 +2218,127 @@ function Module.start(lib)
 		return true
 	end
 
+	-- Remembers the last tool NAME the user (or we) ever had equipped. When we
+	-- need to re-equip after respawn and multiple backpack tools match the
+	-- desired style, we prefer this one — that's how the user keeps Bisento
+	-- across deaths even when Trident (also "Sword" ToolTip) is in the bag.
+	local _lastEquippedName = nil
+
+	-- Hotbar order = combined child order of Character (equipped) + Backpack.
+	-- Roblox binds tools to number keys 1..9 in that same order, so scanning
+	-- this list gives us the slot number to press. Returns an array of tools
+	-- indexed by slot.
+	local function _hotbarSlots()
+		local slots = {}
+		local ch = LocalPlayer.Character
+		local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
+		if ch then
+			for _, c in ipairs(ch:GetChildren()) do
+				if c:IsA("Tool") then table.insert(slots, c) end
+			end
+		end
+		if backpack then
+			for _, c in ipairs(backpack:GetChildren()) do
+				if c:IsA("Tool") then table.insert(slots, c) end
+			end
+		end
+		return slots
+	end
+
+	local KEY_FOR_SLOT = {
+		Enum.KeyCode.One, Enum.KeyCode.Two, Enum.KeyCode.Three, Enum.KeyCode.Four,
+		Enum.KeyCode.Five, Enum.KeyCode.Six, Enum.KeyCode.Seven, Enum.KeyCode.Eight,
+		Enum.KeyCode.Nine,
+	}
+	local VIM = game:GetService("VirtualInputManager")
+	local function _pressHotbarSlot(slotIdx)
+		local key = KEY_FOR_SLOT[slotIdx]
+		if not key then return false end
+		VIM:SendKeyEvent(true,  key, false, game)
+		task.wait(0.03)
+		VIM:SendKeyEvent(false, key, false, game)
+		return true
+	end
+
+	-- Called after respawn (and continuously by loops) to make sure something
+	-- usable is in hand. Mental model:
+	--   1. If you're already holding an equippable tool that matches the style,
+	--      leave it alone. This is the primary path 99% of the time.
+	--   2. If you're empty-handed or holding the wrong style, scan the hotbar
+	--      for the first slot with a matching tool and press its number key.
+	--      Preference within a style match goes to _lastEquippedName so drops
+	--      don't hijack your loadout.
 	local function ensureWeaponEquipped()
 		local ch = LocalPlayer.Character
 		if not ch then return nil end
 		local hum = ch:FindFirstChildOfClass("Humanoid")
-		local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
-		if not hum or hum.Health <= 0 then return nil end  -- skip while dead
+		if not hum or hum.Health <= 0 then return nil end
 
-		-- Already holding something equippable that matches? Done.
 		local held = ch:FindFirstChildOfClass("Tool")
+		local want = cfg.selectedWeapon  -- "" | "Melee" | "Sword" | "Gun" | "Blox Fruit"
+
+		-- Path 1: already holding what we want, or we don't care about style.
 		if held and _isEquippableWeapon(held) then
-			if cfg.selectedWeapon == "" or held.ToolTip == cfg.selectedWeapon then
+			if want == "" or held.ToolTip == want then
+				_lastEquippedName = held.Name
 				return held
 			end
 		end
 
-		if not backpack then return nil end
+		-- Path 2: scan hotbar, find matching slot, press it.
+		local slots = _hotbarSlots()
+		local preferredSlot, styleSlot
 
-		-- Style-specific match (e.g. "Melee", "Sword", "Gun", "Blox Fruit")
-		if cfg.selectedWeapon ~= "" then
-			for _, tool in ipairs(backpack:GetChildren()) do
-				if _isEquippableWeapon(tool) and tool.ToolTip == cfg.selectedWeapon then
-					safe(function() hum:EquipTool(tool) end)
-					task.wait(0.15)
-					return ch:FindFirstChildOfClass("Tool")
-				end
-			end
-		end
-
-		-- Fallback: walk a Melee → Sword → Gun → Blox Fruit preference so
-		-- we always land on a real weapon. Previously this was
-		-- FindFirstChildOfClass("Tool") which returned BF's empty no-Handle
-		-- placeholder and EquipTool silently no-op'd — character ended every
-		-- respawn empty-handed and unable to attack.
-		for _, want in ipairs({ "Melee", "Sword", "Gun", "Blox Fruit" }) do
-			for _, tool in ipairs(backpack:GetChildren()) do
-				if _isEquippableWeapon(tool) and tool.ToolTip == want then
-					safe(function() hum:EquipTool(tool) end)
-					task.wait(0.15)
-					return ch:FindFirstChildOfClass("Tool")
-				end
-			end
-		end
-		-- Last resort: any tool with a Handle + ToolTip (custom style)
-		for _, tool in ipairs(backpack:GetChildren()) do
+		for i, tool in ipairs(slots) do
 			if _isEquippableWeapon(tool) then
-				safe(function() hum:EquipTool(tool) end)
-				task.wait(0.15)
-				return ch:FindFirstChildOfClass("Tool")
+				local matches = (want == "" or tool.ToolTip == want)
+				if matches then
+					if tool.Name == _lastEquippedName and not preferredSlot then
+						preferredSlot = i
+					elseif not styleSlot then
+						styleSlot = i
+					end
+				end
 			end
 		end
-		return nil
+
+		local targetSlot = preferredSlot or styleSlot
+
+		-- If the style didn't match anything, walk a fallback preference so we
+		-- always end up with SOMETHING equipped after respawn.
+		if not targetSlot then
+			for _, fallbackWant in ipairs({ "Melee", "Sword", "Gun", "Blox Fruit" }) do
+				for i, tool in ipairs(slots) do
+					if _isEquippableWeapon(tool) and tool.ToolTip == fallbackWant then
+						targetSlot = i; break
+					end
+				end
+				if targetSlot then break end
+			end
+		end
+
+		if not targetSlot then return held end  -- nothing to equip; leave state
+
+		-- If the target slot IS what we already hold, no-op.
+		local target = slots[targetSlot]
+		if target == held then
+			_lastEquippedName = held.Name
+			return held
+		end
+
+		-- Fire the hotkey (mirrors what the user would do). EquipTool as a
+		-- backup so we don't rely on VIM alone — some executors block VIM
+		-- input to the game process.
+		_pressHotbarSlot(targetSlot)
+		task.wait(0.1)
+		local nowHeld = ch:FindFirstChildOfClass("Tool")
+		if not (nowHeld and nowHeld == target) then
+			safe(function() hum:EquipTool(target) end)
+			task.wait(0.1)
+			nowHeld = ch:FindFirstChildOfClass("Tool")
+		end
+		if nowHeld then _lastEquippedName = nowHeld.Name end
+		return nowHeld
 	end
 
 	-- Legacy alias used by autoFarmLoop
