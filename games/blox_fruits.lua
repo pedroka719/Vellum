@@ -84,6 +84,12 @@ function Module.start(lib)
 		abilitySlots = { Z = false, X = false, C = false, V = false, F = false },
 		abilityCadence = 2.0,        -- sec between ability activations
 
+		-- combat
+		aimbot         = false,      -- keep Mouse.Hit on the nearest enemy
+		aimbotGunsOnly = true,       -- only override aim while a gun is held
+		aimbotRange    = 800,        -- max stud distance to auto-aim
+		infiniteEnergy = false,      -- top the energy/stamina bar back up
+
 		-- fruit sniper — auto-tween to dropped devil fruits and let
 		-- natural collision pickup grab them. Pure passive collection,
 		-- no remote firing (BF pickup is collision-only via Tool.Handle).
@@ -2824,6 +2830,25 @@ function Module.start(lib)
 	-- One-click TP-buy-TP from any NPC in the game without ever leaving
 	-- the auto-farm spot. shopBuy handles the safe segmented tween +
 	-- flight teardown + restore pattern under the hood.
+	-- ─── COMBAT TAB ───
+	local combat = ui.newPage("combat")
+	ui.sectionLabel(combat, "AIMBOT")
+	ui.toggleRow(combat, "Aimbot — auto-aim at nearest enemy",
+		function() return cfg.aimbot end,
+		function(v) cfg.aimbot = v end)
+	ui.toggleRow(combat, "Only while a gun is equipped",
+		function() return cfg.aimbotGunsOnly end,
+		function(v) cfg.aimbotGunsOnly = v end)
+	ui.sliderRow(combat, "Aim range",
+		function() return cfg.aimbotRange end,
+		function(v) cfg.aimbotRange = v end,
+		{ min = 100, max = 3000, step = 50, suffix = " st" })
+
+	ui.sectionLabel(combat, "SUSTAIN")
+	ui.toggleRow(combat, "Infinite energy / stamina",
+		function() return cfg.infiniteEnergy end,
+		function(v) cfg.infiniteEnergy = v end)
+
 	local shopTab = ui.newPage("shop")
 
 	-- Master cancel — stops every active auto-unlock at once. Farm
@@ -3234,11 +3259,12 @@ function Module.start(lib)
 	end)
 
 	ui.newTab("farm",     "Farm",     1)
-	ui.newTab("sea1",     "Sea 1",    2)
-	ui.newTab("visuals",  "Visuals",  3)
-	ui.newTab("shop",     "Shop",     4)
-	ui.newTab("stats",    "Stats",    5)
-	ui.newTab("settings", "Settings", 6)
+	ui.newTab("combat",   "Combat",   2)
+	ui.newTab("sea1",     "Sea 1",    3)
+	ui.newTab("visuals",  "Visuals",  4)
+	ui.newTab("shop",     "Shop",     5)
+	ui.newTab("stats",    "Stats",    6)
+	ui.newTab("settings", "Settings", 7)
 	ui.setActiveTab("farm")
 
 	local function makeFloatingIcon()
@@ -3318,6 +3344,59 @@ function Module.start(lib)
 		end
 	end
 
+	-- ═══════════════════════════ COMBAT ═══════════════════════════
+	-- Aimbot: guns (and every Mouse.Hit-based skill) fire at the cursor, so
+	-- "aim" is just keeping the game's Mouse module pinned on the best enemy —
+	-- the same override the ability caster uses, run every frame while enabled.
+	local function aimbotTarget(hrp)
+		local enemies = workspace:FindFirstChild("Enemies")
+		if not enemies then return nil end
+		local best, bestD
+		for _, m in ipairs(enemies:GetChildren()) do
+			local eh = m:FindFirstChild("HumanoidRootPart")
+			local hum = m:FindFirstChildOfClass("Humanoid")
+			if eh and hum and hum.Health > 0 then
+				local d = (eh.Position - hrp.Position).Magnitude
+				if d <= cfg.aimbotRange and (not bestD or d < bestD) then bestD = d; best = eh end
+			end
+		end
+		return best
+	end
+
+	RunService.RenderStepped:Connect(function()
+		if not cfg.aimbot then return end
+		local mouse = getMouse()
+		if not mouse then return end
+		local ch = LocalPlayer.Character
+		local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+		if not hrp then return end
+		if cfg.aimbotGunsOnly then
+			local tool = ch:FindFirstChildOfClass("Tool")
+			if not (tool and tool:GetAttribute("WeaponType") == "Gun") then return end
+		end
+		local part = aimbotTarget(hrp)
+		if part then mouse.Hit = CFrame.new(part.Position) end
+	end)
+
+	-- Infinite energy / stamina — keep the bar topped up to the highest value
+	-- we've seen. Best-effort (the server may re-assert), but enough for the
+	-- client-side gates on dodge / dash / flash.
+	local _maxEnergy = 0
+	local function infiniteEnergyLoop()
+		while _running do
+			if cfg.infiniteEnergy then
+				local ch = LocalPlayer.Character
+				local e = (ch and ch:FindFirstChild("Energy"))
+					or (LocalPlayer:FindFirstChild("Data") and LocalPlayer.Data:FindFirstChild("Energy"))
+				if e and e:IsA("ValueBase") then
+					if e.Value > _maxEnergy then _maxEnergy = e.Value end
+					if _maxEnergy > 0 and e.Value < _maxEnergy then e.Value = _maxEnergy end
+				end
+			end
+			task.wait(0.3)
+		end
+	end
+
 	-- ═══════════════════════════ KICK OFF ═══════════════════════════
 	task.spawn(autoFarmLoop)
 	task.spawn(autoFarmLevelLoop)
@@ -3326,6 +3405,7 @@ function Module.start(lib)
 	task.spawn(trackProgressLoop)
 	task.spawn(bodyNoclipLoop)
 	task.spawn(espScanLoop)
+	task.spawn(infiniteEnergyLoop)
 	antiAfkLoop()
 
 	Toast.show({
