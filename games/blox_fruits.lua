@@ -2231,12 +2231,32 @@ function Module.start(lib)
 		local targetPos = abilityTargetPos(ch)
 		if not targetPos then return end
 
-		-- Fire each enabled slot the way the tool's own key handler does. No HRP
-		-- CFrame writes here on purpose — the anti-cheat flags concurrent CFrame
-		-- + FireServer, never the fire itself. Keys the weapon lacks return
-		-- instantly (server no-op), so a stray toggle costs nothing.
+		-- Only fire slots the equipped weapon actually HAS. BF lists a weapon's
+		-- real moves under PlayerGui.Main.Skills.<toolName> (verified live: the
+		-- Bisento frame holds exactly Z and X). Without this, turning on all
+		-- five toggles would spray InvokeServer("C"/"V"/"F") at a two-skill
+		-- weapon every tick — harmless (the server no-ops unknown keys) but
+		-- pointless remote spam. If we can't find the frame (unusual weapon,
+		-- HUD not built yet) we fall back to firing whatever the user enabled.
+		local hasSlot
+		local pg = LocalPlayer:FindFirstChild("PlayerGui")
+		local main = pg and pg:FindFirstChild("Main")
+		local skills = main and main:FindFirstChild("Skills")
+		local weaponFrame = skills and skills:FindFirstChild(tool.Name)
+		if weaponFrame then
+			hasSlot = {}
+			for _, c in ipairs(weaponFrame:GetChildren()) do
+				if c:IsA("GuiObject") and #c.Name == 1 then hasSlot[c.Name] = true end
+			end
+		end
+
+		-- Fire the way the tool's own key handler does. No HRP CFrame writes on
+		-- purpose — the anti-cheat flags concurrent CFrame + FireServer, never
+		-- the fire itself. On-cooldown fires are a harmless server no-op, so we
+		-- let the server gate cadence rather than parsing the (unreliable)
+		-- cooldown UI.
 		for _, slot in ipairs(SLOT_NAMES) do
-			if cfg.abilitySlots[slot] then
+			if cfg.abilitySlots[slot] and (not hasSlot or hasSlot[slot]) then
 				safe(function()
 					re:FireServer(targetPos)
 					rf:InvokeServer(slot)
