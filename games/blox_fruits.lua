@@ -2284,22 +2284,25 @@ function Module.start(lib)
 	end
 
 	-- ═══════════════════════════ ABILITY ROTATION ═══════════════════════════
-	-- BF binds Z/X/C/V/F to a ContextActionService handler defined in
-	-- ReplicatedStorage.FruitClient ("casFunc"). It exposes the handler as
-	-- _G.casFunc once a fruit is equipped — see FruitClient line 951.
-	-- We invoke it the same way MobileUIController does (line 604):
-	--   _G.casFunc("DevilFruit", Enum.UserInputState.Begin, fakeInput, KeyCode)
-	-- This skips VirtualInputManager entirely (no UI-focus side effects, no
-	-- Mouse.Hit dependency, no character teleport on Z-dash).
 	--
-	-- For directional aim:
-	--   - mob target: rotate HRP to face current enemy BEFORE firing,
-	--     so the look-vector points at the mob. Restore AutoRotate after.
-	--   - player target: set LocalPlayer:SetAttribute("AAIM", true) — the
-	--     game's own auto-aim picks the nearest player automatically.
+	-- Design principle (rewrite 2026-06 after two failed inline attempts):
+	--   The master loop runs in its OWN coroutine on a fast 0.5s heartbeat.
+	--   Every fire is dispatched via task.spawn so the ~300ms Bisento ritual
+	--   (Hold/spam/release) NEVER blocks the master loop OR the M1 spam loop.
+	--   Nothing serializes. The M1 chain stays at full cadence.
 	--
-	-- Sword/race skills don't bind through casFunc; they use their own
-	-- per-tool handlers. Auto-abilities here only covers fruit Z/X/C/V/F.
+	-- Fire protocols verified live:
+	--   Sword (Bisento etc):
+	--     Holding.Value=true → MousePos=target → RE:FireServer(target) x5 @ 50ms
+	--     → Holding.Value=false → RF:InvokeServer("Z") → RE:FireServer(false)
+	--     Spy'd 271.6 damage per hit on Galley Captain.
+	--   Fruit (via _G.casFunc):
+	--     _G.casFunc("DevilFruit", Begin, {UserInputState=Begin, KeyCode=Z}, KeyCode.Z)
+	--     casFunc is set by FruitClient on fruit tool Equipped — nil for swords.
+	--
+	-- No UI cooldown gate. Server rejects mis-fires silently — cheaper than
+	-- trying to read animated Cooldown frames (whose semantics differ between
+	-- fruit and sword UI templates and change between BF updates).
 	local SLOT_NAMES = { "Z", "X", "C", "V", "F" }
 	local KEYCODE = {
 		Z = Enum.KeyCode.Z, X = Enum.KeyCode.X,
@@ -2307,137 +2310,113 @@ function Module.start(lib)
 		F = Enum.KeyCode.F,
 	}
 
-	-- Fruit fire path: BF's mobile UI calls _G.casFunc("DevilFruit", Begin, input, kc).
-	local function fireFruitAbility(slot)
+	local function _fireFruitAsync(slot)
 		local fn = rawget(_G, "casFunc")
 		if type(fn) ~= "function" then return false end
 		local kc = KEYCODE[slot]
 		if not kc then return false end
-		local input = {
-			UserInputState = Enum.UserInputState.Begin,
-			UserInputType  = Enum.UserInputType.Keyboard,
-			KeyCode        = kc,
-		}
-		return pcall(fn, "DevilFruit", Enum.UserInputState.Begin, input, kc)
+		task.spawn(function()
+			local input = {
+				UserInputState = Enum.UserInputState.Begin,
+				UserInputType  = Enum.UserInputType.Keyboard,
+				KeyCode        = kc,
+			}
+			pcall(fn, "DevilFruit", Enum.UserInputState.Begin, input, kc)
+		end)
+		return true
 	end
 
-	-- Sword fire path — the FULL ritual matters. Verified via remote spy +
-	-- live damage test 2026-06 (Bisento Z dealt 423 dmg → killed a Fishman
-	-- Commando). The decompiled Bisento Tool LocalScript shows the move is
-	-- gated by tool.Holding.Value — the server requires the Hold-spam-release
-	-- sequence to register the swing, not just a one-shot FireServer+Invoke.
-	--
-	-- Sequence:
-	--   1. Holding.Value = true       (signals "key down")
-	--   2. MousePos.Value = target    (write target before position fires)
-	--   3. FireServer(target) x5 at 50ms  (server needs multiple position frames
-	--                                      to validate target — single fire gets
-	--                                      ignored as "no charge time")
-	--   4. Holding.Value = false      (signals "key released")
-	--   5. InvokeServer(slot)         (the actual damage trigger)
-	--   6. FireServer(false)          (cleanup signal — release follow-up)
-	local function fireToolAbility(slot, targetPos)
+	local function _fireToolAsync(slot, targetPos)
 		local ch = LocalPlayer.Character
 		local tool = ch and ch:FindFirstChildOfClass("Tool")
 		if not tool then return false end
 		local re = tool:FindFirstChild("RemoteEvent")
 		local rf = tool:FindFirstChild("RemoteFunction")
-		local mp = tool:FindFirstChild("MousePos")
-		local holding = tool:FindFirstChild("Holding")
 		if not (re and re:IsA("RemoteEvent") and rf and rf:IsA("RemoteFunction")) then
 			return false
 		end
-		if holding and holding:IsA("BoolValue") then holding.Value = true end
-		if mp and mp:IsA("Vector3Value") and targetPos then mp.Value = targetPos end
-		for _ = 1, 5 do
-			pcall(function() re:FireServer(targetPos) end)
-			task.wait(0.05)
-		end
-		if holding and holding:IsA("BoolValue") then holding.Value = false end
-		pcall(function() rf:InvokeServer(slot) end)
-		pcall(function() re:FireServer(false) end)
+		local mp = tool:FindFirstChild("MousePos")
+		local holding = tool:FindFirstChild("Holding")
+		-- Fire ritual runs in its own task so the master loop returns immediately.
+		task.spawn(function()
+			if holding and holding:IsA("BoolValue") then holding.Value = true end
+			if mp and mp:IsA("Vector3Value") and targetPos then mp.Value = targetPos end
+			for _ = 1, 5 do
+				pcall(function() re:FireServer(targetPos) end)
+				task.wait(0.05)
+			end
+			if holding and holding:IsA("BoolValue") then holding.Value = false end
+			pcall(function() rf:InvokeServer(slot) end)
+			pcall(function() re:FireServer(false) end)
+		end)
 		return true
 	end
 
-	local function fireAbility(slot, targetPos)
-		if fireFruitAbility(slot) then return true end
-		return fireToolAbility(slot, targetPos)
+	-- Prefer fruit path when a fruit is equipped (casFunc set), else sword path.
+	local function _fireAbilityAsync(slot, targetPos)
+		if _fireFruitAsync(slot) then return true end
+		return _fireToolAsync(slot, targetPos)
 	end
 
-	local function abilityRotationTick()
-		if not cfg.autoFarm then return end
-		local ch = LocalPlayer.Character
-		local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
-		if not hrp then return end
-
-		-- Sync player auto-aim with our config every tick so toggling the UI
-		-- mirrors immediately. AAIM is the in-game flag the skill handler reads.
-		LocalPlayer:SetAttribute("AAIM", cfg.abilityAimPlayers and true or false)
-
-		-- Honor on-screen cooldown indicators when available.
-		local canFire = {}
-		local pg = LocalPlayer:FindFirstChild("PlayerGui")
-		local mainGui = pg and pg:FindFirstChild("Main")
-		local skillsGui = mainGui and mainGui:FindFirstChild("Skills")
-		local combatFrame = skillsGui and skillsGui:FindFirstChild("Combat")
-		for _, slot in ipairs(SLOT_NAMES) do
-			if cfg.abilitySlots[slot] then
-				local ready = true
-				if combatFrame then
-					local slotFrame = combatFrame:FindFirstChild(slot)
-					local cdFrame = slotFrame and slotFrame:FindFirstChild("Cooldown")
-					if cdFrame and cdFrame.Visible then ready = false end
-				end
-				if ready then table.insert(canFire, slot) end
+	local function _findAbilityTarget(hrp, radius)
+		local enemies = workspace:FindFirstChild("Enemies")
+		if not enemies then return nil end
+		local closest, cdist = nil, radius * radius
+		local self = hrp.Position
+		for _, e in ipairs(enemies:GetChildren()) do
+			local eh = e:FindFirstChild("HumanoidRootPart")
+			local hum = e:FindFirstChild("Humanoid")
+			if eh and hum and hum.Health > 0 then
+				local d = eh.Position - self
+				local d2 = d.X*d.X + d.Y*d.Y + d.Z*d.Z
+				if d2 < cdist then cdist = d2; closest = eh end
 			end
 		end
-		if #canFire == 0 then return end
-
-		-- Resolve target position. Sword fires take an explicit Vector3; fruit fires
-		-- use look-vector (so we still rotate HRP for fruit case).
-		local mob = currentTarget
-		local mobHrp = mob and mob.Parent and mob:FindFirstChild("HumanoidRootPart")
-		local targetPos
-		if mobHrp then
-			targetPos = mobHrp.Position
-		else
-			targetPos = hrp.Position + (hrp.CFrame.LookVector * 30)
-		end
-
-		local restoreAuto
-		if cfg.abilityAimMobs and mobHrp then
-			restoreAuto = true
-			local hum = ch:FindFirstChildOfClass("Humanoid")
-			if hum then hum.AutoRotate = false end
-			local p = hrp.Position
-			local t = Vector3.new(mobHrp.Position.X, p.Y, mobHrp.Position.Z)
-			hrp.CFrame = CFrame.new(p, t)
-		end
-
-		for _, slot in ipairs(canFire) do
-			safe(function() fireAbility(slot, targetPos) end)
-			task.wait(0.05)
-		end
-
-		if restoreAuto then
-			task.delay(0.2, function()
-				local hum = ch:FindFirstChildOfClass("Humanoid")
-				if hum then hum.AutoRotate = true end
-			end)
-		end
+		return closest
 	end
 
-	local function abilityRotationLoop()
+	local _lastAbilityFire = 0
+	local function _abilityMasterLoop()
 		while _running do
-			local anyOn = false
-			for _, slot in ipairs(SLOT_NAMES) do
-				if cfg.abilitySlots[slot] then anyOn = true; break end
+			task.wait(0.5)  -- tight heartbeat, not the fire cadence
+			if not cfg.autoFarm then continue end
+			if (os.clock() - _lastAbilityFire) < (cfg.abilityCadence or 2) then continue end
+
+			-- Sync player-aim attribute (BF reads it internally for casFunc).
+			LocalPlayer:SetAttribute("AAIM", cfg.abilityAimPlayers and true or false)
+
+			-- Collect enabled slots.
+			local enabled = {}
+			for _, s in ipairs(SLOT_NAMES) do
+				if cfg.abilitySlots[s] then table.insert(enabled, s) end
 			end
-			if anyOn then
-				safe(abilityRotationTick)
-				jwait(cfg.abilityCadence)
-			else
-				jwait(1.0)
+			if #enabled == 0 then continue end
+
+			-- Need character + a mob within range to bother firing.
+			local ch = LocalPlayer.Character
+			local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+			if not hrp then continue end
+			local target = _findAbilityTarget(hrp, 250)
+			if not target then continue end
+
+			-- Optional face-target rotation for directional swings. This is
+			-- non-blocking — just sets CFrame + restores AutoRotate later.
+			if cfg.abilityAimMobs then
+				local hum = ch:FindFirstChildOfClass("Humanoid")
+				if hum then hum.AutoRotate = false end
+				local p = hrp.Position
+				local t = Vector3.new(target.Position.X, p.Y, target.Position.Z)
+				pcall(function() hrp.CFrame = CFrame.new(p, t) end)
+				task.delay(0.35, function()
+					local h2 = ch:FindFirstChildOfClass("Humanoid")
+					if h2 then h2.AutoRotate = true end
+				end)
+			end
+
+			_lastAbilityFire = os.clock()
+			for _, slot in ipairs(enabled) do
+				_fireAbilityAsync(slot, target.Position)
+				task.wait(0.08)  -- brief stagger so slots don't collide server-side
 			end
 		end
 	end
@@ -3501,7 +3480,7 @@ function Module.start(lib)
 	-- ═══════════════════════════ KICK OFF ═══════════════════════════
 	task.spawn(autoFarmLoop)
 	task.spawn(autoFarmLevelLoop)
-	task.spawn(abilityRotationLoop)
+	task.spawn(_abilityMasterLoop)
 	task.spawn(autoStatsLoop)
 	task.spawn(trackProgressLoop)
 	task.spawn(bodyNoclipLoop)
