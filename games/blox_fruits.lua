@@ -652,6 +652,30 @@ function Module.start(lib)
 		local dist = (destPos - hrp.Position).Magnitude
 		if dist < 3 then return end
 
+		-- Hold the whole body non-collidable for the entire tween. tpToIsland
+		-- (and the long sub-zone snap) deliberately drop flight and re-enable
+		-- CanCollide before calling us — so without this the CFrame tween drags
+		-- a SOLID character through island geometry, the physics engine shoves
+		-- back, and BF rolls us back (or wedges us under the island at sea
+		-- level). BF re-enables CanCollide on its own the moment we stop forcing
+		-- it, so there's nothing to restore afterward.
+		local ch = hrp.Parent
+		local parts = {}
+		if ch then
+			for _, p in ipairs(ch:GetDescendants()) do
+				if p:IsA("BasePart") then parts[#parts + 1] = p end
+			end
+		end
+		local noclipping = true
+		task.spawn(function()
+			while noclipping do
+				for _, p in ipairs(parts) do
+					if p.CanCollide then p.CanCollide = false end
+				end
+				RunService.Heartbeat:Wait()
+			end
+		end)
+
 		for attempt = 1, maxRetries do
 			local curSpeed = attempt == 1 and speed or fallbackSpeed
 			local dur = math.max(0.1, dist / curSpeed)
@@ -661,12 +685,12 @@ function Module.start(lib)
 			tween.Completed:Wait()
 			if activeTween == tween then activeTween = nil end
 
-			local arrived = (hrp.Position - destPos).Magnitude < 80
-			if arrived then return end
+			if (hrp.Position - destPos).Magnitude < 80 then break end  -- arrived
 
 			dist = (destPos - hrp.Position).Magnitude
 			task.wait(0.3)
 		end
+		noclipping = false
 	end
 
 	local function tpToIsland(name)
@@ -1853,6 +1877,15 @@ function Module.start(lib)
 				continue
 			end
 
+			-- Lock the enemy filter to THIS quest's mob RIGHT NOW — before any of
+			-- the TP/continue branches below. applyQuestFilters used to live at
+			-- the very bottom of the loop, which left a window where autoFarm was
+			-- already on but farmTargetName was still "" (fresh) or a stale mob.
+			-- In that window pickEnemy falls back to the nearest enemy, and at a
+			-- shared sub-zone (Fountain City = Galley Captains + the Cyborg boss)
+			-- that means flying off to fight a boss the user told us to skip.
+			applyQuestFilters(quest)
+
 			-- Quest completion is handled below in the HUD state machine.
 			-- The old block here used questIsComplete() which read the HUD,
 			-- but it ran BEFORE adopt and nil'd Q.current on every cycle —
@@ -2029,7 +2062,6 @@ function Module.start(lib)
 				end
 			end
 
-			applyQuestFilters(quest)
 			jwait(3.0)
 		end
 	end
