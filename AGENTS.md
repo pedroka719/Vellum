@@ -179,6 +179,25 @@ Cross-sea threshold: `|player.X| > 30000` is Sea 2, else Sea 1. Sea 3 not yet ma
 
 ---
 
+## Where we are right now — handoff (2026-07-01, end of session)
+
+**Read this first.** This whole session was spent fixing three headline bugs, working directly on LO's live client (`Mys7iczstone @ Blox Fruits`) through the `roblox-executor-mcp` — probe, fix, push, re-probe. All three are fixed, pushed to `main`, and live-verified. LO reloaded fresh (closed/reopened the game, not a cache) and is testing.
+
+- **Auto-abilities (Z/X/C/V/F)** — NOW CAST FOR REAL, via VirtualInputManager. This was the hard one and went through a wrong turn: the first fix (`7c9c8b5`) fired the tool's remotes and *looked* right on the spy, but LO called it out — with M1 off it dealt 0 damage and no animation. The remote path casts nothing. The working method (`a165c3e`) drives the tool's own key handler with `VIM:SendKeyEvent` and aims by overriding `ReplicatedStorage.Mouse.Hit`. Live-verified: killed a Galley Captain from a farm hover (1437→0), no kick.
+- **Auto-unlock (shop)** — fixed (`7c9c8b5`). Was reading `BuyItem` return codes backwards and spun forever on an item the account already owned.
+- **Farm TP + boss targeting** — fixed (`41c7f4b`). Was flying to the Cyborg boss despite skip-boss, and wedging the player under the island on TP.
+
+**Latest `main` = `efad8ed`** (code at `a165c3e`, rest is docs). Load: `loadstring(game:HttpGet("https://raw.githubusercontent.com/Pekenz/vellum/main/loader.lua"))()`.
+
+**Open threads LO may raise next session:**
+1. **Ability kicks** over a long session — my longest live test was 6 casts, no kick, but the VIM handler does touch the HRP (BodyGyro/BodyPosition) like a real key press. If kicks show up, revert the ability block in `a165c3e`; the old remote path was dead code, nothing of value is lost.
+2. **Quake Sphere (X) aim** — it landed inside the integrated kill but read 0 in one isolated test. Its AoE may need a different aim point than `currentTarget`'s HRP. Tune `castSkill` if X isn't hitting.
+3. **VIM needs the Roblox window focused** — abilities won't fire if the game is minimized/backgrounded. Inherent to the method.
+
+Everything else (cross-sea TP, weapon-drop hijack, ROADMAP items) is untouched and still open.
+
+---
+
 ## Feature status (as of 2026-07-01)
 
 ### Working
@@ -231,7 +250,9 @@ Worked directly on the connected client via the MCP — probed, fixed, pushed, r
 - **Firing `InvokeServer` for a key the weapon lacks returns instantly** (~0.05s), no hang — harmless.
 - **`BuyItem` codes: 1=bought, 0=not enough Beli, 2=already own.**
 
-## Recent session log — 2026-06-30 to 2026-07-01
+## Historical session log — 2026-06-30 to 2026-07-01 (pre-VIM)
+
+> Kept for context. These were the EARLIER, failed ability attempts (all remote/CFrame based) and the cross-sea research. The ability problem is now solved via VIM — see the 2026-07-01 fixes-shipped section above. The kick post-mortems below are still worth reading before touching movement code.
 
 ### What was accomplished
 
@@ -252,28 +273,30 @@ Worked directly on the connected client via the MCP — probed, fixed, pushed, r
 - **Cross-sea detection MUST be single-shot at `tpToIsland` entry**, never per-tween. If we ever add it back inside `_tweenHRPTo`, gate it by a "cross-sea intent" flag passed in by the caller.
 - **Zero HRP CFrame writes during ability fire.** The AC vector isn't the fire protocol itself — it's the concurrent CFrame + FireServer pattern. Let Mouse.Hit read the natural cursor position.
 - **Never spam-CFrame indefinitely without exit condition.** All position rewrites must terminate on state change (sea flip, mob death) or a hard timeout.
-- **`_G.casFunc` is fruit-only.** Every ability attempt for a sword-only user has to use the tool's `RemoteEvent + RemoteFunction`. There is no shared code path.
+- **`_G.casFunc` is fruit-only** (set only when a fruit Tool fires `Equipped`). ~~Use the tool's RemoteEvent + RemoteFunction for swords.~~ **SUPERSEDED:** that remote path casts nothing — the answer for both swords and fruits is a VIM key press through the tool's own handler (see the 2026-07-01 fixes above).
 - **The equip system needs the mental model separated**: "which style Vellum PREFERS for farming" vs "which tool to re-equip after respawn." Trying to combine these in one dropdown always ends badly.
 
 ### Current file state
 
-`games/blox_fruits.lua` is at commit `0359bdc`. Auto-abilities, auto-unlock, and the farm TP / quest-filter bugs are all fixed and live-verified against the connected client (Mys7iczstone). These sit on top of the old stable `eee1a89`.
+`games/blox_fruits.lua` code is at `a165c3e` (everything after that is docs). Auto-abilities (VIM), auto-unlock, and the farm TP / quest-filter fixes are all live-verified against the connected client (Mys7iczstone), sitting on top of the old stable `eee1a89`.
 
-`git log --oneline -6`:
+This session's commits (newest first):
 ```
+efad8ed docs(agents): correct ability method — VIM cast, not remotes
+a165c3e fix(abilities): cast via VirtualInputManager, aim by overriding Mouse.Hit
+419cf0f docs(agents): abilities/unlock/farm fixed — record root causes/facts
 0359bdc fix(abilities): only fire slots the equipped weapon actually has
 41c7f4b fix(farm): noclip through TP tweens, lock quest filter before travel
 7c9c8b5 fix(abilities+shop): cast via RemoteFunction, correct BuyItem codes
-fff9f04 docs: rewrite AGENTS.md — current state, learnings, framing for future AIs
-eee1a89 revert: blox_fruits.lua all the way back to 0959589 — cross-sea code was buggy
-0614bbb revert: back to 29275d2 — new ability master loop caused a kick
 ```
+(before this session: `fff9f04` AGENTS.md rewrite, `eee1a89` last stable.)
 
 ---
 
 ## Working with the owner
 
 - **LO expects proof, not promises.** Live-probe before shipping. "The protocol looks right" isn't enough — kill a mob with it via a probe, THEN ship.
+- **A damage number is NOT proof a mechanic works.** LO caught the ability "fix" that was really just the Bisento's M1 racking up numbers. For anything combat-related, isolate the variable (turn M1/auto-farm off) or confirm with a second independent signal — the skill animation playing, the remote-spy args, a cooldown flip — before claiming success. LO's skepticism is usually right; earn the "it works."
 - **Terse, direct communication.** No hedging. State findings, state conclusion, state next step. LO reads diffs; don't narrate them.
 - **Verify the loader actually reloaded.** Multiple failed sessions came from working against a stale in-memory script. Always probe for the presence of a unique string from your latest commit before trusting behavior.
 - **Never spawn subagents unless the owner explicitly asks.** LO handles his work inline.
