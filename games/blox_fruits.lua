@@ -346,38 +346,12 @@ function Module.start(lib)
 		return enemy:FindFirstChildOfClass("MeshPart")
 	end
 
-	-- Forward-declared. Populated late in the module (after all cfg/UI/etc
-	-- are defined) so attackOnce can invoke it inline. Every M1 fire also
-	-- gets a chance to fire Z/X/C/V/F — throttled by cfg.abilityCadence.
-	-- This bypasses the separate abilityRotationLoop coroutine (which was
-	-- silently dying on some reloads and never invoking tick even though the
-	-- protocol was verified working).
-	local _fireAbilitiesInline = nil
-	local _lastAbilityFire     = 0
-
 	local function attackOnce(enemy)
 		local part = pickPart(enemy)
 		local hash = getHash()
 		if not part or not hash then return false end
 		safe(function() R.RegisterAttack:FireServer(cfg.damageMultiplier) end)
 		safe(function() R.RegisterHit:FireServer(part, {}, nil, hash) end)
-		-- Ability rotation, throttled. Inlined into the M1 loop because the
-		-- separate rotation coroutine wasn't reliably firing (external test
-		-- showed manual tick invocation deals 588 dmg, but the internal loop
-		-- somehow never ticks). This guarantees abilities fire during autofarm.
-		if _fireAbilitiesInline and (os.clock() - _lastAbilityFire) >= (cfg.abilityCadence or 2) then
-			local anyOn = false
-			for _, s in ipairs({"Z","X","C","V","F"}) do
-				if cfg.abilitySlots[s] then anyOn = true; break end
-			end
-			if anyOn then
-				_lastAbilityFire = os.clock()
-				safe(function() _fireAbilitiesInline(enemy) end)
-				if getgenv().VellumBF and getgenv().VellumBF.diag then
-					warn("[Vellum] ability tick fired via attackOnce; target=" .. tostring(enemy and enemy.Name))
-				end
-			end
-		end
 		return true
 	end
 
@@ -2218,127 +2192,57 @@ function Module.start(lib)
 		return true
 	end
 
-	-- Remembers the last tool NAME the user (or we) ever had equipped. When we
-	-- need to re-equip after respawn and multiple backpack tools match the
-	-- desired style, we prefer this one — that's how the user keeps Bisento
-	-- across deaths even when Trident (also "Sword" ToolTip) is in the bag.
-	local _lastEquippedName = nil
-
-	-- Hotbar order = combined child order of Character (equipped) + Backpack.
-	-- Roblox binds tools to number keys 1..9 in that same order, so scanning
-	-- this list gives us the slot number to press. Returns an array of tools
-	-- indexed by slot.
-	local function _hotbarSlots()
-		local slots = {}
-		local ch = LocalPlayer.Character
-		local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
-		if ch then
-			for _, c in ipairs(ch:GetChildren()) do
-				if c:IsA("Tool") then table.insert(slots, c) end
-			end
-		end
-		if backpack then
-			for _, c in ipairs(backpack:GetChildren()) do
-				if c:IsA("Tool") then table.insert(slots, c) end
-			end
-		end
-		return slots
-	end
-
-	local KEY_FOR_SLOT = {
-		Enum.KeyCode.One, Enum.KeyCode.Two, Enum.KeyCode.Three, Enum.KeyCode.Four,
-		Enum.KeyCode.Five, Enum.KeyCode.Six, Enum.KeyCode.Seven, Enum.KeyCode.Eight,
-		Enum.KeyCode.Nine,
-	}
-	local VIM = game:GetService("VirtualInputManager")
-	local function _pressHotbarSlot(slotIdx)
-		local key = KEY_FOR_SLOT[slotIdx]
-		if not key then return false end
-		VIM:SendKeyEvent(true,  key, false, game)
-		task.wait(0.03)
-		VIM:SendKeyEvent(false, key, false, game)
-		return true
-	end
-
-	-- Called after respawn (and continuously by loops) to make sure something
-	-- usable is in hand. Mental model:
-	--   1. If you're already holding an equippable tool that matches the style,
-	--      leave it alone. This is the primary path 99% of the time.
-	--   2. If you're empty-handed or holding the wrong style, scan the hotbar
-	--      for the first slot with a matching tool and press its number key.
-	--      Preference within a style match goes to _lastEquippedName so drops
-	--      don't hijack your loadout.
 	local function ensureWeaponEquipped()
 		local ch = LocalPlayer.Character
 		if not ch then return nil end
 		local hum = ch:FindFirstChildOfClass("Humanoid")
-		if not hum or hum.Health <= 0 then return nil end
+		local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
+		if not hum or hum.Health <= 0 then return nil end  -- skip while dead
 
+		-- Already holding something equippable that matches? Done.
 		local held = ch:FindFirstChildOfClass("Tool")
-		local want = cfg.selectedWeapon  -- "" | "Melee" | "Sword" | "Gun" | "Blox Fruit"
-
-		-- Path 1: already holding what we want, or we don't care about style.
 		if held and _isEquippableWeapon(held) then
-			if want == "" or held.ToolTip == want then
-				_lastEquippedName = held.Name
+			if cfg.selectedWeapon == "" or held.ToolTip == cfg.selectedWeapon then
 				return held
 			end
 		end
 
-		-- Path 2: scan hotbar, find matching slot, press it.
-		local slots = _hotbarSlots()
-		local preferredSlot, styleSlot
+		if not backpack then return nil end
 
-		for i, tool in ipairs(slots) do
+		-- Style-specific match (e.g. "Melee", "Sword", "Gun", "Blox Fruit")
+		if cfg.selectedWeapon ~= "" then
+			for _, tool in ipairs(backpack:GetChildren()) do
+				if _isEquippableWeapon(tool) and tool.ToolTip == cfg.selectedWeapon then
+					safe(function() hum:EquipTool(tool) end)
+					task.wait(0.15)
+					return ch:FindFirstChildOfClass("Tool")
+				end
+			end
+		end
+
+		-- Fallback: walk a Melee → Sword → Gun → Blox Fruit preference so
+		-- we always land on a real weapon. Previously this was
+		-- FindFirstChildOfClass("Tool") which returned BF's empty no-Handle
+		-- placeholder and EquipTool silently no-op'd — character ended every
+		-- respawn empty-handed and unable to attack.
+		for _, want in ipairs({ "Melee", "Sword", "Gun", "Blox Fruit" }) do
+			for _, tool in ipairs(backpack:GetChildren()) do
+				if _isEquippableWeapon(tool) and tool.ToolTip == want then
+					safe(function() hum:EquipTool(tool) end)
+					task.wait(0.15)
+					return ch:FindFirstChildOfClass("Tool")
+				end
+			end
+		end
+		-- Last resort: any tool with a Handle + ToolTip (custom style)
+		for _, tool in ipairs(backpack:GetChildren()) do
 			if _isEquippableWeapon(tool) then
-				local matches = (want == "" or tool.ToolTip == want)
-				if matches then
-					if tool.Name == _lastEquippedName and not preferredSlot then
-						preferredSlot = i
-					elseif not styleSlot then
-						styleSlot = i
-					end
-				end
+				safe(function() hum:EquipTool(tool) end)
+				task.wait(0.15)
+				return ch:FindFirstChildOfClass("Tool")
 			end
 		end
-
-		local targetSlot = preferredSlot or styleSlot
-
-		-- If the style didn't match anything, walk a fallback preference so we
-		-- always end up with SOMETHING equipped after respawn.
-		if not targetSlot then
-			for _, fallbackWant in ipairs({ "Melee", "Sword", "Gun", "Blox Fruit" }) do
-				for i, tool in ipairs(slots) do
-					if _isEquippableWeapon(tool) and tool.ToolTip == fallbackWant then
-						targetSlot = i; break
-					end
-				end
-				if targetSlot then break end
-			end
-		end
-
-		if not targetSlot then return held end  -- nothing to equip; leave state
-
-		-- If the target slot IS what we already hold, no-op.
-		local target = slots[targetSlot]
-		if target == held then
-			_lastEquippedName = held.Name
-			return held
-		end
-
-		-- Fire the hotkey (mirrors what the user would do). EquipTool as a
-		-- backup so we don't rely on VIM alone — some executors block VIM
-		-- input to the game process.
-		_pressHotbarSlot(targetSlot)
-		task.wait(0.1)
-		local nowHeld = ch:FindFirstChildOfClass("Tool")
-		if not (nowHeld and nowHeld == target) then
-			safe(function() hum:EquipTool(target) end)
-			task.wait(0.1)
-			nowHeld = ch:FindFirstChildOfClass("Tool")
-		end
-		if nowHeld then _lastEquippedName = nowHeld.Name end
-		return nowHeld
+		return nil
 	end
 
 	-- Legacy alias used by autoFarmLoop
@@ -2470,71 +2374,34 @@ function Module.start(lib)
 		-- mirrors immediately. AAIM is the in-game flag the skill handler reads.
 		LocalPlayer:SetAttribute("AAIM", cfg.abilityAimPlayers and true or false)
 
-		-- Honor on-screen cooldown indicators when available. BF's skill UI lives
-		-- under PlayerGui.Main.Skills.<ToolName> (e.g. "Bisento", "Dough"), NOT
-		-- "Combat" — that's a template frame with Cooldown.Visible baked to true
-		-- so reading Visible always returns "cooling". The real signal is
-		-- Cooldown.Size.X.Scale: 0 = ready, >0 = cooling (BF animates the fill).
-		-- We also keep a tool-name-agnostic fallback that lets every fire through
-		-- when the UI isn't where we expect — the server enforces its own
-		-- cooldown, so wasted fires are silent no-ops, not damage glitches.
+		-- Honor on-screen cooldown indicators when available.
 		local canFire = {}
 		local pg = LocalPlayer:FindFirstChild("PlayerGui")
 		local mainGui = pg and pg:FindFirstChild("Main")
 		local skillsGui = mainGui and mainGui:FindFirstChild("Skills")
-		local tool = ch:FindFirstChildOfClass("Tool")
-		local skillFrame = skillsGui and tool and skillsGui:FindFirstChild(tool.Name)
+		local combatFrame = skillsGui and skillsGui:FindFirstChild("Combat")
 		for _, slot in ipairs(SLOT_NAMES) do
 			if cfg.abilitySlots[slot] then
 				local ready = true
-				if skillFrame then
-					local slotFrame = skillFrame:FindFirstChild(slot)
-					local cdFrame   = slotFrame and slotFrame:FindFirstChild("Cooldown")
-					if cdFrame and cdFrame.Size.X.Scale > 0.01 then ready = false end
+				if combatFrame then
+					local slotFrame = combatFrame:FindFirstChild(slot)
+					local cdFrame = slotFrame and slotFrame:FindFirstChild("Cooldown")
+					if cdFrame and cdFrame.Visible then ready = false end
 				end
 				if ready then table.insert(canFire, slot) end
 			end
 		end
 		if #canFire == 0 then return end
 
-		-- Resolve target position. The autoFarm pickEnemy + currentTarget pipeline
-		-- isn't reliable for ability fires (timing gaps, hash respawn, ESP
-		-- contention), so we do our OWN nearest-live-enemy scan here. Look-vector
-		-- fallback is useless for sword slams — Bisento Z deposits AOE damage
-		-- at the target position, so without a real Vector3 the swing lands in
-		-- empty air and registers as a wasted fire. Verified via remote spy:
-		-- our protocol replicates correctly but with a phantom target.
+		-- Resolve target position. Sword fires take an explicit Vector3; fruit fires
+		-- use look-vector (so we still rotate HRP for fruit case).
 		local mob = currentTarget
 		local mobHrp = mob and mob.Parent and mob:FindFirstChild("HumanoidRootPart")
-		local mobHealthy = mob and mob.Parent and (function()
-			local h = mob:FindFirstChild("Humanoid"); return h and h.Health > 0
-		end)()
-		if not (mobHrp and mobHealthy) then
-			local enemies = workspace:FindFirstChild("Enemies")
-			if enemies then
-				local closest, cdist = nil, math.huge
-				local self = hrp.Position
-				for _, e in ipairs(enemies:GetChildren()) do
-					local eh = e:FindFirstChild("HumanoidRootPart")
-					local hum = e:FindFirstChild("Humanoid")
-					if eh and hum and hum.Health > 0 then
-						local d = (eh.Position - self).Magnitude
-						if d < cdist and d < 200 then
-							cdist = d; closest = eh; mob = e
-						end
-					end
-				end
-				mobHrp = closest
-			end
-		end
 		local targetPos
 		if mobHrp then
 			targetPos = mobHrp.Position
 		else
-			-- No mob in range — skip this tick entirely rather than fire at air.
-			-- The cooldown reservation is server-side; firing at nothing
-			-- consumes the cooldown for no damage.
-			return
+			targetPos = hrp.Position + (hrp.CFrame.LookVector * 30)
 		end
 
 		local restoreAuto
@@ -2559,9 +2426,6 @@ function Module.start(lib)
 			end)
 		end
 	end
-
-	-- Wire the inline hook so attackOnce fires abilities during autofarm.
-	_fireAbilitiesInline = abilityRotationTick
 
 	local function abilityRotationLoop()
 		while _running do
