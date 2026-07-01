@@ -2074,10 +2074,12 @@ function Module.start(lib)
 					if centroid then
 						local dest = centroid + Vector3.new(0, 6, 0)
 						local snapDist = (dest - hrp.Position).Magnitude
-						if snapDist < 1000 then
-							-- Short snap → direct CFrame. BP just gets its
-							-- target updated on the new HRP position so it
-							-- doesn't yank us back to the old enemy.
+						if snapDist < 100 then
+							-- Tiny drift → direct CFrame. Under ~100 studs BF's
+							-- anti-cheat accepts an instant reposition, so we
+							-- skip the heavier flight-teardown tween. BP just
+							-- gets its target updated on the new HRP position so
+							-- it doesn't yank us back to the old enemy.
 							hoverEnabled = false
 							hrp.CFrame = CFrame.new(dest)
 							task.wait(0.4)
@@ -2086,11 +2088,16 @@ function Module.start(lib)
 							end
 							hoverEnabled = true
 						else
-							-- Long snap → tear down flight first, otherwise
-							-- the BP (MaxForce=inf, Position=old enemy) fights
-							-- the tween every frame and BF's anti-cheat
-							-- rejects the resulting jitter (rollback to
-							-- mid-sea). Same pattern tpToIsland uses for
+							-- Real snap (≥100 studs) → tear down flight first,
+							-- otherwise the BP (MaxForce=inf, Position=old
+							-- enemy) fights the tween every frame and BF's
+							-- anti-cheat rejects the resulting jitter — OR,
+							-- worse, a raw CFrame jump of 400-1000 studs (the
+							-- Galley Captain sub-zone sits ~880 studs from the
+							-- Cyborg spawn we get stranded on) gets rolled
+							-- straight back. The noclip tween moves at a
+							-- server-accepted speed so the move sticks. Same
+							-- pattern tpToIsland uses for
 							-- cross-island moves. Skip the island re-TP
 							-- check while we're snapping by setting
 							-- _tpInProgress so autoFarmLoop doesn't fight us.
