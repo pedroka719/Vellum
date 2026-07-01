@@ -313,18 +313,18 @@ function UI.mount(opts)
 		local l = Instance.new("TextLabel", wrap)
 		l.Size = UDim2.new(1, -14, 1, 0); l.Position = UDim2.fromOffset(10, 0)
 		l.BackgroundTransparency = 1
-		l.Text = string.upper(text); l.Font = Enum.Font.GothamBold; l.TextSize = 10
+		l.Text = string.upper(text); l.Font = Enum.Font.GothamBold; l.TextSize = 11
 		Theme.bind(l, "TextColor3", "textDim"); l.TextXAlignment = Enum.TextXAlignment.Left
 		return wrap
 	end
 
 	-- Animated iOS-style toggle. getF/setF read+write the underlying state.
 	function Builder.toggleRow(parent, labelText, getF, setF)
-		local r = Builder.row(parent, 30)
+		local r = Builder.row(parent, 32)
 		local l = Instance.new("TextLabel", r)
 		l.Size = UDim2.new(1, -56, 1, 0); l.Position = UDim2.fromOffset(12, 0)
 		l.BackgroundTransparency = 1; l.Text = labelText
-		l.Font = Enum.Font.Gotham; l.TextSize = 12
+		l.Font = Enum.Font.GothamMedium; l.TextSize = 13
 		Theme.bind(l, "TextColor3", "text"); l.TextXAlignment = Enum.TextXAlignment.Left
 		local pill = Instance.new("TextButton", r)
 		pill.Size = UDim2.fromOffset(34, 18); pill.Position = UDim2.new(1, -44, 0.5, -9)
@@ -450,7 +450,7 @@ function UI.mount(opts)
 		local l = Instance.new("TextLabel", r)
 		l.Size = UDim2.new(0, 130, 1, 0); l.Position = UDim2.fromOffset(12, 0)
 		l.BackgroundTransparency = 1; l.Text = labelText
-		l.Font = Enum.Font.Gotham; l.TextSize = 12
+		l.Font = Enum.Font.GothamMedium; l.TextSize = 13
 		Theme.bind(l, "TextColor3", "text"); l.TextXAlignment = Enum.TextXAlignment.Left
 
 		-- Number box (right-aligned, fixed width)
@@ -601,7 +601,7 @@ function UI.mount(opts)
 		local l = Instance.new("TextLabel", r)
 		l.Size = UDim2.new(0.55, 0, 1, 0); l.Position = UDim2.fromOffset(12, 0)
 		l.BackgroundTransparency = 1; l.Text = labelText
-		l.Font = Enum.Font.Gotham; l.TextSize = 12
+		l.Font = Enum.Font.GothamMedium; l.TextSize = 13
 		Theme.bind(l, "TextColor3", "text"); l.TextXAlignment = Enum.TextXAlignment.Left
 
 		-- The visible trigger pill — empty intrinsic Text so the default
@@ -808,13 +808,163 @@ function UI.mount(opts)
 		return r
 	end
 
+	-- Multi-select dropdown. Same premium float panel as dropdownRow, but every
+	-- option is a checkbox and the panel stays open while you tick things. The
+	-- trigger pill shows the live count. The option list can be long, so the
+	-- panel caps its height and scrolls. State is owned by the caller through
+	-- isSelectedFn(opt)->bool and toggleFn(opt) (which flips one option).
+	function Builder.multiDropdownRow(parent, labelText, options, isSelectedFn, toggleFn, opts)
+		opts = opts or {}
+		local emptyText = opts.emptyText or "None"
+		local r = Builder.row(parent, 34)
+
+		local l = Instance.new("TextLabel", r)
+		l.Size = UDim2.new(0.46, 0, 1, 0); l.Position = UDim2.fromOffset(12, 0)
+		l.BackgroundTransparency = 1; l.Text = labelText
+		l.Font = Enum.Font.GothamMedium; l.TextSize = 13
+		Theme.bind(l, "TextColor3", "text"); l.TextXAlignment = Enum.TextXAlignment.Left
+
+		local pill = Instance.new("TextButton", r)
+		pill.Size = UDim2.new(0.54, -20, 0, 24); pill.Position = UDim2.new(0.46, 0, 0.5, -12)
+		Theme.bind(pill, "BackgroundColor3", "elev"); pill.AutoButtonColor = false; pill.Text = ""
+		Instance.new("UICorner", pill).CornerRadius = UDim.new(0, 5)
+		local pillStroke = Instance.new("UIStroke", pill)
+		Theme.bind(pillStroke, "Color", "stroke"); pillStroke.Thickness = 1; pillStroke.Transparency = 0.5
+
+		local valueLbl = Instance.new("TextLabel", pill)
+		valueLbl.Size = UDim2.new(1, -22, 1, 0); valueLbl.Position = UDim2.fromOffset(10, 0)
+		valueLbl.BackgroundTransparency = 1
+		valueLbl.Font = Enum.Font.GothamMedium; valueLbl.TextSize = 12
+		valueLbl.TextXAlignment = Enum.TextXAlignment.Left
+
+		local arrow = Instance.new("TextLabel", pill)
+		arrow.Size = UDim2.fromOffset(14, 24); arrow.Position = UDim2.new(1, -16, 0, 0)
+		arrow.BackgroundTransparency = 1
+		arrow.Font = Enum.Font.Gotham; arrow.TextSize = 11
+		Theme.bind(arrow, "TextColor3", "textDim"); arrow.Text = "▾"
+
+		local function countSelected()
+			local n = 0
+			for _, o in ipairs(options) do if isSelectedFn(o) then n = n + 1 end end
+			return n
+		end
+		local function refreshPill()
+			local n = countSelected()
+			valueLbl.Text = (n == 0) and emptyText or (n .. " selected")
+			valueLbl.TextColor3 = (n == 0) and Theme.token("textDim") or Theme.token("text")
+		end
+		refreshPill()
+
+		pill.MouseEnter:Connect(function() pillStroke.Transparency = 0.15; arrow.TextColor3 = Theme.token("accent") end)
+		pill.MouseLeave:Connect(function() pillStroke.Transparency = 0.5; arrow.TextColor3 = Theme.token("textDim") end)
+
+		local floatPanel, closeConn
+		local function close()
+			if not floatPanel then return end
+			local p = floatPanel; floatPanel = nil
+			if closeConn then closeConn:Disconnect(); closeConn = nil end
+			arrow.Text = "▾"
+			local tw = TweenService:Create(p, TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
+				{ Size = UDim2.new(p.Size.X.Scale, p.Size.X.Offset, 0, 0) })
+			tw:Play(); tw.Completed:Connect(function() if p.Parent then p:Destroy() end end)
+		end
+
+		local function open()
+			if floatPanel then return end
+			arrow.Text = "▴"
+			local pillAbs, pillSize = pill.AbsolutePosition, pill.AbsoluteSize
+			local guiAbs = gui.AbsolutePosition or Vector2.new(0, 0)
+			local panelW = math.max(pillSize.X, 170)
+			local rowH = 26
+			local fullH = math.min(#options * (rowH + 2) + 10, 240)
+
+			local p = Instance.new("ScrollingFrame")
+			p.Name = "Vellum_MultiDropdown"
+			p.Position = UDim2.fromOffset(pillAbs.X - guiAbs.X, pillAbs.Y - guiAbs.Y + pillSize.Y + 4)
+			p.Size = UDim2.fromOffset(panelW, 0)
+			Theme.bind(p, "BackgroundColor3", "panel"); p.BorderSizePixel = 0
+			p.ZIndex = 100; p.ClipsDescendants = true
+			p.ScrollBarThickness = 4; p.CanvasSize = UDim2.fromOffset(0, 0)
+			p.AutomaticCanvasSize = Enum.AutomaticSize.Y
+			Instance.new("UICorner", p).CornerRadius = UDim.new(0, 6)
+			local accentStroke = Instance.new("UIStroke", p)
+			Theme.bind(accentStroke, "Color", "accent"); accentStroke.Thickness = 1.4; accentStroke.Transparency = 0.25
+			local pad = Instance.new("UIPadding", p)
+			pad.PaddingTop = UDim.new(0, 5); pad.PaddingBottom = UDim.new(0, 5)
+			pad.PaddingLeft = UDim.new(0, 5); pad.PaddingRight = UDim.new(0, 5)
+			local list = Instance.new("UIListLayout", p)
+			list.Padding = UDim.new(0, 2); list.SortOrder = Enum.SortOrder.LayoutOrder
+
+			for i, opt in ipairs(options) do
+				local optBtn = Instance.new("TextButton", p)
+				optBtn.LayoutOrder = i; optBtn.Size = UDim2.new(1, 0, 0, rowH)
+				optBtn.AutoButtonColor = false; optBtn.Text = ""; optBtn.ZIndex = 101
+				Theme.bind(optBtn, "BackgroundColor3", "row"); optBtn.BackgroundTransparency = 0.4
+				Instance.new("UICorner", optBtn).CornerRadius = UDim.new(0, 4)
+
+				local box = Instance.new("Frame", optBtn)
+				box.Size = UDim2.fromOffset(15, 15); box.Position = UDim2.fromOffset(9, (rowH - 15) / 2)
+				box.BackgroundColor3 = Theme.token("elev"); box.BorderSizePixel = 0; box.ZIndex = 102
+				Instance.new("UICorner", box).CornerRadius = UDim.new(0, 4)
+				local boxStroke = Instance.new("UIStroke", box); Theme.bind(boxStroke, "Color", "stroke"); boxStroke.Thickness = 1
+				local tick = Instance.new("TextLabel", box)
+				tick.Size = UDim2.fromScale(1, 1); tick.BackgroundTransparency = 1
+				tick.Font = Enum.Font.GothamBold; tick.TextSize = 11; tick.Text = "✓"; tick.ZIndex = 103
+				tick.TextColor3 = Theme.token("accentText")
+
+				local optLbl = Instance.new("TextLabel", optBtn)
+				optLbl.Size = UDim2.new(1, -36, 1, 0); optLbl.Position = UDim2.fromOffset(31, 0)
+				optLbl.BackgroundTransparency = 1
+				optLbl.Font = Enum.Font.GothamMedium; optLbl.TextSize = 12
+				optLbl.TextXAlignment = Enum.TextXAlignment.Left; optLbl.Text = opt; optLbl.ZIndex = 102
+				Theme.bind(optLbl, "TextColor3", "text")
+
+				local function paintOpt()
+					local sel = isSelectedFn(opt)
+					box.BackgroundColor3 = sel and Theme.token("accent") or Theme.token("elev")
+					tick.Visible = sel
+				end
+				paintOpt()
+
+				optBtn.MouseEnter:Connect(function() optBtn.BackgroundTransparency = 0 end)
+				optBtn.MouseLeave:Connect(function() optBtn.BackgroundTransparency = 0.4 end)
+				optBtn.MouseButton1Click:Connect(function()
+					toggleFn(opt); paintOpt(); refreshPill()
+				end)
+			end
+
+			p.Parent = gui
+			TweenService:Create(p, TweenInfo.new(0.18, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
+				{ Size = UDim2.fromOffset(panelW, fullH) }):Play()
+			floatPanel = p
+
+			closeConn = UserInputService.InputBegan:Connect(function(input, processed)
+				if processed then return end
+				if input.UserInputType ~= Enum.UserInputType.MouseButton1
+				   and input.UserInputType ~= Enum.UserInputType.Touch then return end
+				local pos = UserInputService:GetMouseLocation()
+				if not floatPanel then return end
+				local abs, sz = floatPanel.AbsolutePosition, floatPanel.AbsoluteSize
+				if sz.X <= 0 or sz.Y <= 0 then return end
+				local inPanel = pos.X >= abs.X and pos.X <= abs.X + sz.X and pos.Y >= abs.Y and pos.Y <= abs.Y + sz.Y
+				local pa, ps = pill.AbsolutePosition, pill.AbsoluteSize
+				local inPill = pos.X >= pa.X and pos.X <= pa.X + ps.X and pos.Y >= pa.Y and pos.Y <= pa.Y + ps.Y
+				if not inPanel and not inPill then close() end
+			end)
+		end
+
+		pill.MouseButton1Click:Connect(function() if floatPanel then close() else open() end end)
+		Theme.bindCall(refreshPill)
+		return r, refreshPill
+	end
+
 	function Builder.actionBtn(parent, label, fn)
 		local b = Instance.new("TextButton", parent)
-		b.Size = UDim2.new(1, -8, 0, 28)
+		b.Size = UDim2.new(1, -8, 0, 30)
 		Theme.bind(b, "BackgroundColor3", "elev"); b.AutoButtonColor = false
-		b.Font = Enum.Font.GothamMedium; b.TextSize = 12
+		b.Font = Enum.Font.GothamMedium; b.TextSize = 13
 		Theme.bind(b, "TextColor3", "text"); b.Text = label
-		Instance.new("UICorner", b).CornerRadius = UDim.new(0, 4)
+		Instance.new("UICorner", b).CornerRadius = UDim.new(0, 5)
 		local strokeB = Instance.new("UIStroke", b)
 		Theme.bind(strokeB, "Color", "stroke")
 		strokeB.Thickness = 1; strokeB.Transparency = 0.6
