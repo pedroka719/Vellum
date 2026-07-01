@@ -85,9 +85,10 @@ function Module.start(lib)
 		abilityCadence = 2.0,        -- sec between ability activations
 
 		-- combat
-		aimbot         = false,      -- keep Mouse.Hit on the nearest enemy
-		aimbotGunsOnly = true,       -- only override aim while a gun is held
-		aimbotRange    = 800,        -- max stud distance to auto-aim
+		aimbot         = false,      -- master aimbot switch
+		aimbotMode     = "Kill Aura",-- "Kill Aura" (auto-hit nearest) or "Silent Aim" (hit on YOUR shot)
+		aimbotGunsOnly = true,       -- only fire while a gun is equipped
+		aimbotRange    = 800,        -- max stud distance to a target
 		infiniteEnergy = false,      -- top the energy/stamina bar back up
 
 		-- fruit sniper — auto-tween to dropped devil fruits and let
@@ -2840,16 +2841,20 @@ function Module.start(lib)
 	-- ─── COMBAT TAB ───
 	local combat = ui.newPage("combat")
 	ui.sectionLabel(combat, "AIMBOT")
-	ui.toggleRow(combat, "Aimbot — auto-aim at nearest enemy",
+	ui.toggleRow(combat, "Aimbot",
 		function() return cfg.aimbot end,
 		function(v) cfg.aimbot = v end)
-	ui.toggleRow(combat, "Only while a gun is equipped",
-		function() return cfg.aimbotGunsOnly end,
-		function(v) cfg.aimbotGunsOnly = v end)
-	ui.sliderRow(combat, "Aim range",
+	ui.dropdownRow(combat, "Mode",
+		{ "Kill Aura", "Silent Aim" },
+		function() return cfg.aimbotMode end,
+		function(v) cfg.aimbotMode = v end)
+	ui.sliderRow(combat, "Range",
 		function() return cfg.aimbotRange end,
 		function(v) cfg.aimbotRange = v end,
 		{ min = 100, max = 3000, step = 50, suffix = " st" })
+	ui.toggleRow(combat, "Only while a gun is equipped",
+		function() return cfg.aimbotGunsOnly end,
+		function(v) cfg.aimbotGunsOnly = v end)
 
 	ui.sectionLabel(combat, "SUSTAIN")
 	ui.toggleRow(combat, "Infinite energy / stamina",
@@ -3355,34 +3360,111 @@ function Module.start(lib)
 	-- Aimbot: guns (and every Mouse.Hit-based skill) fire at the cursor, so
 	-- "aim" is just keeping the game's Mouse module pinned on the best enemy —
 	-- the same override the ability caster uses, run every frame while enabled.
-	local function aimbotTarget(hrp)
+	-- ═══════════════════════════ AIMBOT ═══════════════════════════
+	-- Two modes, both driving the proven hash-M1 path (attackOnce → the same
+	-- RegisterAttack + RegisterHit the farm uses to drop Galley Captains):
+	--   • Kill Aura  — auto-fires at the nearest mob in range, every cadence.
+	--   • Silent Aim — fires at whatever's closest to your crosshair, but only
+	--                  when YOU click to shoot, so the gun's shot lands on aim.
+	-- No metamethod hook here on purpose: this codebase disables __namecall /
+	-- __index (Hyperion delayed-crash risk), so Silent Aim reads the click
+	-- through UserInputService and injects the hit rather than rewriting the
+	-- outgoing packet. Bosses are hash-immune (Cyborg took 0), so we skip them.
+	local _BOSS_NAMES = {}
+	for _, q in ipairs(SEA1_QUESTS) do if q.boss then _BOSS_NAMES[q.mob] = true end end
+
+	local function _gunEquipped(ch)
+		local tool = ch and ch:FindFirstChildOfClass("Tool")
+		if not tool then return false end
+		-- BF classifies weapons by ToolTip (Melee/Sword/Gun/Blox Fruit); some
+		-- forks also stamp a WeaponType attribute. Accept either.
+		return tool.ToolTip == "Gun" or tool:GetAttribute("WeaponType") == "Gun"
+	end
+
+	-- Nearest breathing, non-boss mob to a world position, within range.
+	local function _nearestMob(fromPos)
 		local enemies = workspace:FindFirstChild("Enemies")
 		if not enemies then return nil end
 		local best, bestD
 		for _, m in ipairs(enemies:GetChildren()) do
-			local eh = m:FindFirstChild("HumanoidRootPart")
-			local hum = m:FindFirstChildOfClass("Humanoid")
-			if eh and hum and hum.Health > 0 then
-				local d = (eh.Position - hrp.Position).Magnitude
-				if d <= cfg.aimbotRange and (not bestD or d < bestD) then bestD = d; best = eh end
+			if not _BOSS_NAMES[m.Name] then
+				local eh  = m:FindFirstChild("HumanoidRootPart")
+				local hum = m:FindFirstChildOfClass("Humanoid")
+				if eh and hum and hum.Health > 0 then
+					local d = (eh.Position - fromPos).Magnitude
+					if d <= cfg.aimbotRange and (not bestD or d < bestD) then bestD = d; best = m end
+				end
 			end
 		end
 		return best
 	end
 
-	RunService.RenderStepped:Connect(function()
-		if not cfg.aimbot then return end
-		local mouse = getMouse()
-		if not mouse then return end
-		local ch = LocalPlayer.Character
-		local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
-		if not hrp then return end
-		if cfg.aimbotGunsOnly then
-			local tool = ch:FindFirstChildOfClass("Tool")
-			if not (tool and tool:GetAttribute("WeaponType") == "Gun") then return end
+	-- Target closest to the camera's aim ray (smallest angular deviation),
+	-- within range and roughly in front. Considers mobs AND other players so
+	-- Silent Aim can be pointed at a PvP target — the hash path's effect on
+	-- players is unverified, but a whiffed RegisterHit is harmless.
+	local function _crosshairTarget()
+		local cam = workspace.CurrentCamera
+		local ch  = LocalPlayer.Character
+		if not cam or not ch then return nil end
+		local origin = cam.CFrame.Position
+		local look   = cam.CFrame.LookVector
+		local best, bestAng
+		local function consider(model)
+			if model == ch then return end
+			local eh  = model:FindFirstChild("HumanoidRootPart")
+			local hum = model:FindFirstChildOfClass("Humanoid")
+			if not (eh and hum and hum.Health > 0) then return end
+			local to   = eh.Position - origin
+			local dist = to.Magnitude
+			if dist < 1 or dist > cfg.aimbotRange then return end
+			local ang = math.acos(math.clamp(look:Dot(to.Unit), -1, 1))
+			if ang > 0.6 then return end  -- ~34°: must be in front of the crosshair
+			if not bestAng or ang < bestAng then bestAng = ang; best = model end
 		end
-		local part = aimbotTarget(hrp)
-		if part then mouse.Hit = CFrame.new(part.Position) end
+		local enemies = workspace:FindFirstChild("Enemies")
+		if enemies then
+			for _, m in ipairs(enemies:GetChildren()) do
+				if not _BOSS_NAMES[m.Name] then consider(m) end
+			end
+		end
+		for _, pl in ipairs(Players:GetPlayers()) do
+			if pl ~= LocalPlayer and pl.Character then consider(pl.Character) end
+		end
+		return best
+	end
+
+	-- Kill Aura — auto-attack loop.
+	task.spawn(function()
+		while _running do
+			if cfg.aimbot and cfg.aimbotMode == "Kill Aura" then
+				local ch  = LocalPlayer.Character
+				local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+				if hrp and (not cfg.aimbotGunsOnly or _gunEquipped(ch)) then
+					local mob = _nearestMob(hrp.Position)
+					if mob then
+						ensureHash()
+						safe(function() attackOnce(mob) end)
+					end
+				end
+			end
+			task.wait(cfg.attackCadence)
+		end
+	end)
+
+	-- Silent Aim — inject a hit on the crosshair target when YOU click to
+	-- fire. processed==true means the click landed on UI/chat, not the world.
+	UserInputService.InputBegan:Connect(function(input, processed)
+		if processed then return end
+		if not (cfg.aimbot and cfg.aimbotMode == "Silent Aim") then return end
+		if input.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
+		local ch = LocalPlayer.Character
+		if cfg.aimbotGunsOnly and not _gunEquipped(ch) then return end
+		local target = _crosshairTarget()
+		if target then
+			ensureHash()
+			safe(function() attackOnce(target) end)
+		end
 	end)
 
 	-- Infinite energy / stamina — keep the bar topped up to the highest value
