@@ -78,7 +78,12 @@ function Module.start(lib)
 		                             -- ~5min spawn timers tank XP/hour vs regular mob quests
 
 		-- weapon selection
-		selectedWeapon = "",         -- name of weapon to auto-equip ("" = first available)
+		selectedWeapon = "",         -- style (Melee/Sword/Gun/Blox Fruit) — "" = first available
+		lockCurrentWeapon = true,    -- once we have SOME equippable tool, don't swap on new drops.
+		                             -- Fixes the drop-Trident-and-lose-Bisento bug: a fresh sword in
+		                             -- the backpack matching cfg.selectedWeapon="Sword" was hijacking
+		                             -- ensureWeaponEquipped every tick. With this flag on, we only
+		                             -- switch when the character is empty-handed (respawn recovery).
 
 		-- ability rotation
 		abilitySlots = { Z = false, X = false, C = false, V = false, F = false },
@@ -346,12 +351,29 @@ function Module.start(lib)
 		return enemy:FindFirstChildOfClass("MeshPart")
 	end
 
+	-- Forward-declared. Populated late in the module (after all cfg/UI/etc
+	-- are defined) so attackOnce can invoke it inline. Every M1 fire also
+	-- gets a chance to fire Z/X/C/V/F — throttled by cfg.abilityCadence.
+	-- This bypasses the separate abilityRotationLoop coroutine (which was
+	-- silently dying on some reloads and never invoking tick even though the
+	-- protocol was verified working).
+	local _fireAbilitiesInline = nil
+	local _lastAbilityFire     = 0
+
 	local function attackOnce(enemy)
 		local part = pickPart(enemy)
 		local hash = getHash()
 		if not part or not hash then return false end
 		safe(function() R.RegisterAttack:FireServer(cfg.damageMultiplier) end)
 		safe(function() R.RegisterHit:FireServer(part, {}, nil, hash) end)
+		-- Ability rotation, throttled. Inlined into the M1 loop because the
+		-- separate rotation coroutine wasn't reliably firing (external test
+		-- showed manual tick invocation deals 588 dmg, but the internal loop
+		-- somehow never ticks). This guarantees abilities fire during autofarm.
+		if _fireAbilitiesInline and (os.clock() - _lastAbilityFire) >= (cfg.abilityCadence or 2) then
+			_lastAbilityFire = os.clock()
+			safe(function() _fireAbilitiesInline(enemy) end)
+		end
 		return true
 	end
 
@@ -2199,9 +2221,12 @@ function Module.start(lib)
 		local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
 		if not hum or hum.Health <= 0 then return nil end  -- skip while dead
 
-		-- Already holding something equippable that matches? Done.
+		-- Already holding something equippable? With lockCurrentWeapon on, keep it
+		-- unconditionally so newly-picked-up drops (Trident etc) don't hijack the
+		-- weapon slot mid-farm. Otherwise fall back to style-match.
 		local held = ch:FindFirstChildOfClass("Tool")
 		if held and _isEquippableWeapon(held) then
+			if cfg.lockCurrentWeapon then return held end
 			if cfg.selectedWeapon == "" or held.ToolTip == cfg.selectedWeapon then
 				return held
 			end
@@ -2463,6 +2488,9 @@ function Module.start(lib)
 			end)
 		end
 	end
+
+	-- Wire the inline hook so attackOnce fires abilities during autofarm.
+	_fireAbilitiesInline = abilityRotationTick
 
 	local function abilityRotationLoop()
 		while _running do
@@ -2845,6 +2873,9 @@ function Module.start(lib)
 		function(name)
 			cfg.selectedWeapon = (name == "Auto") and "" or name
 		end)
+	ui.toggleRow(farm, "Lock current weapon (ignore drops)",
+		function() return cfg.lockCurrentWeapon end,
+		function(v) cfg.lockCurrentWeapon = v end)
 
 	ui.sectionLabel(farm, "ABILITIES")
 	ui.toggleRow(farm, "Z",
