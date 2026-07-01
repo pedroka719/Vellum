@@ -1627,6 +1627,13 @@ function Module.start(lib)
 	--   item     — exact item string the server expects ("Triple Katana")
 	--   displayName — for the toast (defaults to item)
 	-- Returns true once the item is owned (server code 1 = bought, 2 = already own).
+	-- Player level — lets the resolver tell a level gate from a price gate.
+	local function _playerLevel()
+		local data = LocalPlayer:FindFirstChild("Data")
+		local lvl = data and data:FindFirstChild("Level")
+		return lvl and lvl.Value or nil
+	end
+
 	-- BuyItem return codes, straight from the decompiled shop dialogue:
 	--   1 = purchased, 0 = not enough Beli, 2 = already own, anything else =
 	-- unavailable/gone. Returns the number, or nil if the remote itself errored.
@@ -1661,40 +1668,44 @@ function Module.start(lib)
 		return success
 	end
 
-	-- Fruit dealer auto-sniper. Polls GetFruits every 30s. When any fruit
-	-- in cfg.dealerSnipeList enters the OnSale=true rotation, fires
-	-- shopBuy via the BloxFruitDealer NPC. Only one buy per rotation
-	-- (BF refreshes the rotation periodically and we don't want to
-	-- ping-pong on the same fruit if BuyItem returns code 1).
-	local _dealerLastRotation = ""
+	-- Live dealer poll — deliberately FAST (~2s) so a snipe fires the instant a
+	-- chosen fruit hits the rotation; the whole server races for the same fruit.
+	-- ONE loop feeds both the auto-snipe buyer AND the Shop tab's "On Sale Now"
+	-- list, so we only hit GetFruits once per tick. The display callback is
+	-- wired by the shop UI. The buyer only sweeps when the rotation actually
+	-- changes and never re-grabs a fruit it already bought this cycle.
+	local _dealerOnSaleCb        -- function(onSaleList) — assigned by the Shop UI
+	local _dealerSig = ""
+	local _dealerSniped = {}
 	task.spawn(function()
 		while _running do
-			task.wait(30)
-			if cfg.dealerSniper and next(cfg.dealerSnipeList) then
-				local ok, fruits = pcall(function()
-					return R.CommF_:InvokeServer("GetFruits")
-				end)
-				if ok and type(fruits) == "table" then
-					-- Build a rotation signature to avoid re-buying same slot
-					local sig = ""
-					for _, f in pairs(fruits) do
-						if f.OnSale then sig = sig .. f.Name .. "|" end
+			local ok, fruits = pcall(function() return R.CommF_:InvokeServer("GetFruits") end)
+			if ok and type(fruits) == "table" then
+				local onSale, sig = {}, ""
+				for _, f in pairs(fruits) do
+					if type(f) == "table" and f.OnSale and f.Name then
+						onSale[#onSale + 1] = f
+						sig = sig .. f.Name .. "|"
 					end
-					if sig ~= _dealerLastRotation then
-						_dealerLastRotation = sig
-						for _, f in pairs(fruits) do
-							if f.OnSale and cfg.dealerSnipeList[f.Name] then
-								local price = tonumber(f.Price) or 0
-								local beli = LocalPlayer.Data and LocalPlayer.Data.Beli and LocalPlayer.Data.Beli.Value or 0
-								if beli >= price then
-									shopBuy("BloxFruitDealer", f.Name, f.Name:gsub("-", " "))
-									task.wait(2)  -- gap between back-to-back snipes
-								end
+				end
+				if sig ~= _dealerSig then
+					_dealerSig = sig
+					_dealerSniped = {}
+					if _dealerOnSaleCb then pcall(_dealerOnSaleCb, onSale) end
+				end
+				if cfg.dealerSniper and next(cfg.dealerSnipeList) then
+					for _, f in ipairs(onSale) do
+						if cfg.dealerSnipeList[f.Name] and not _dealerSniped[f.Name] then
+							local price = tonumber(f.Price) or 0
+							local beli = (LocalPlayer.Data and LocalPlayer.Data.Beli and LocalPlayer.Data.Beli.Value) or 0
+							if beli >= price and shopBuy("BloxFruitDealer", f.Name, f.Name:gsub("-", " ")) then
+								_dealerSniped[f.Name] = true
 							end
 						end
 					end
 				end
 			end
+			task.wait(2)
 		end
 	end)
 
@@ -2862,27 +2873,19 @@ function Module.start(lib)
 		end)
 	end
 
-	task.spawn(function()
-		while _running do
-			local ok, fruits = pcall(function() return R.CommF_:InvokeServer("GetFruits") end)
-			if ok and type(fruits) == "table" then
-				for _, c in ipairs(saleHolder:GetChildren()) do
-					if c:IsA("Frame") then c:Destroy() end
-				end
-				local onSale = {}
-				for _, f in pairs(fruits) do
-					if type(f) == "table" and f.OnSale and f.Name then onSale[#onSale + 1] = f end
-				end
-				table.sort(onSale, function(a, b) return (tonumber(a.Price) or 0) < (tonumber(b.Price) or 0) end)
-				saleEmpty.Visible = (#onSale == 0)
-				saleEmpty.Text = (#onSale == 0) and "  Nothing on sale right now." or ""
-				for _, f in ipairs(onSale) do
-					renderSaleRow(f.Name:gsub("-", " "), tonumber(f.Price) or 0)
-				end
-			end
-			task.wait(20)
+	-- The fast dealer poll (top of the file) calls this the moment the rotation
+	-- changes, so the display stays in lockstep with what the sniper sees.
+	_dealerOnSaleCb = function(onSale)
+		for _, c in ipairs(saleHolder:GetChildren()) do
+			if c:IsA("Frame") then c:Destroy() end
 		end
-	end)
+		table.sort(onSale, function(a, b) return (tonumber(a.Price) or 0) < (tonumber(b.Price) or 0) end)
+		saleEmpty.Visible = (#onSale == 0)
+		saleEmpty.Text = (#onSale == 0) and "  Nothing on sale right now." or ""
+		for _, f in ipairs(onSale) do
+			renderSaleRow(f.Name:gsub("-", " "), tonumber(f.Price) or 0)
+		end
+	end
 
 	-- Weapons section. Curated to the top swords/guns/melee + their
 	-- assigned dealer. Pulled from BF wiki + WeaponData. Buy fires
@@ -2972,42 +2975,65 @@ function Module.start(lib)
 		})
 	end
 
-	-- Auto-buy. Try the purchase now; if we're not eligible yet (can't afford
-	-- it, or a level gate the server hasn't lifted), keep retrying quietly in
-	-- the background until we are. This DELIBERATELY does not touch the farm —
-	-- the old router silently flipped Auto Farm Level, farm band, and target
-	-- name when you clicked "unlock", which is exactly why it felt like a fake
-	-- toggle. Want to grind toward a gate? Use the Farm tab. This is wired up
-	-- only for price/level gates (renderShopSection gates the toggle on kind);
-	-- BuyItem can't conjure a boss kill or fragments, so those don't get one.
+	-- Auto-unlock resolver — the ACTIVE kind. Flip it on and Vellum drops what
+	-- it's doing and works the item's requirements until the purchase goes
+	-- through. We try to buy first (already own / can afford → done, no farm
+	-- churn). Otherwise we point the farm at the gate and poll BuyItem: the
+	-- server only lets it through once you actually qualify, so the poll is a
+	-- reliable "done" signal for every gate kind. One goal at a time — starting
+	-- an unlock clears any other in flight so the farm isn't torn in two.
 	local function startUnlock(item, displayName, prereq)
 		local code = _buyItemCode(item)
-		if code == 1 then
-			Toast.show({ title = "Purchased!", body = displayName or item,
-				kind = "success", duration = 4, key = "unlock:done:" .. item })
-			return
-		elseif code == 2 then
-			Toast.show({ title = "Already owned", body = displayName or item,
-				kind = "success", duration = 4, key = "unlock:done:" .. item })
+		if code == 1 or code == 2 then
+			Toast.show({ title = code == 2 and "Already owned" or "Purchased!",
+				body = displayName or item, kind = "success", duration = 4,
+				key = "unlock:done:" .. item })
 			return
 		end
-		local why = (code == 0) and "not enough Beli yet"
-			or ((prereq and prereq.hint) or "not eligible yet")
+
+		for k in pairs(_unlockPollers) do
+			if k ~= item then _unlockPollers[k] = nil end
+		end
+
+		local kind = prereq and prereq.kind
+		if kind == "level" then
+			local need = prereq.value or 0
+			if (_playerLevel() or 0) < need then
+				cfg.farmLevelMin = math.max(0, need - 25)
+				cfg.farmLevelMax = 9999
+			end
+			cfg.skipBossQuests = true
+			cfg.autoFarmLevel  = true
+			cfg.autoFarm       = true
+		elseif kind == "mastery" then
+			-- Grow mastery: the style has to be the one swinging. We can only pin
+			-- the 4 weapon TYPES (Melee/Sword/Gun/Blox Fruit); named techniques
+			-- (Black Leg, etc.) the user picks on their hotbar themselves.
+			local VALID = { Melee = true, Sword = true, Gun = true, ["Blox Fruit"] = true }
+			if prereq.target and VALID[prereq.target] then cfg.selectedWeapon = prereq.target end
+			cfg.autoFarmLevel = true
+			cfg.autoFarm      = true
+		elseif kind == "fragment" or kind == "quest" or kind == "boss" then
+			cfg.skipBossQuests = false  -- bosses/quests are where these come from
+			cfg.autoFarmLevel  = true
+			cfg.autoFarm       = true
+		else
+			cfg.autoFarm = true
+		end
+
 		Toast.show({
-			title = "Auto-buy armed",
-			body  = (displayName or item) .. "  •  " .. why .. " — buying the moment you qualify",
-			kind  = "info", duration = 5, key = "unlock:" .. item,
+			title = "Auto-unlock engaged",
+			body  = (displayName or item) .. "  •  " .. ((prereq and prereq.hint) or "working the requirements")
+			        .. " — buying the moment you qualify",
+			kind  = "info", duration = 6, key = "unlock:" .. item,
 		})
 		_pollUntilBought(item, displayName)
 	end
 
 	-- Render a shop section. Un-gated items get a plain Buy/Learn button. Gated
-	-- items show the requirement inline on the button; a price/level gate also
-	-- gets an "Auto-buy when eligible" toggle (the background poller). Gates
-	-- BuyItem can't satisfy on its own — boss / quest / fragment / mastery /
-	-- race — get NO toggle: an honest button that reports the real reason beats
-	-- a fake toggle that can never resolve.
-	local AUTO_BUYABLE = { level = true }
+	-- items show the requirement inline on the button (a one-shot "try it now")
+	-- PLUS an Auto-unlock toggle — flip it on and the resolver takes over the
+	-- farm to work that item's requirements until it can buy it.
 	local function renderShopSection(parent, title, verb, items)
 		ui.sectionLabel(parent, title)
 		for _, e in ipairs(items) do
@@ -3019,14 +3045,12 @@ function Module.start(lib)
 				ui.actionBtn(parent, verb .. "  " .. e.item .. "   ·   " .. e.prereq.hint, function()
 					tryShopBuy(e.npc, e.item, e.item, e.prereq)
 				end)
-				if AUTO_BUYABLE[e.prereq.kind] then
-					ui.toggleRow(parent, "    Auto-buy " .. e.item .. " when eligible",
-						function() return isUnlockActive(e.item) end,
-						function(v)
-							if v then startUnlock(e.item, e.item, e.prereq)
-							else      cancelUnlock(e.item, e.item) end
-						end)
-				end
+				ui.toggleRow(parent, "    Auto-unlock " .. e.item,
+					function() return isUnlockActive(e.item) end,
+					function(v)
+						if v then startUnlock(e.item, e.item, e.prereq)
+						else      cancelUnlock(e.item, e.item) end
+					end)
 			end
 		end
 	end
@@ -3075,7 +3099,7 @@ function Module.start(lib)
 		tryShopBuy("AbilityTeacher", "Buso", "Buso Haki",
 			{kind="level", value=300, hint="Lv 300 + 5M Beli"})
 	end)
-	ui.toggleRow(shopTab, "    Auto-buy Buso Haki when eligible",
+	ui.toggleRow(shopTab, "    Auto-unlock Buso Haki",
 		function() return isUnlockActive("Buso") end,
 		function(v)
 			if v then startUnlock("Buso", "Buso Haki", {kind="level", value=300, hint="Lv 300 + 5M Beli"})
