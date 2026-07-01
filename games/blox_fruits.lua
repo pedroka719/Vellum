@@ -83,8 +83,6 @@ function Module.start(lib)
 		-- ability rotation
 		abilitySlots = { Z = false, X = false, C = false, V = false, F = false },
 		abilityCadence = 2.0,        -- sec between ability activations
-		abilityAimMobs   = true,     -- rotate HRP to face current mob before firing directional moves
-		abilityAimPlayers = false,   -- enable BF's built-in player auto-aim (AAIM attribute)
 
 		-- fruit sniper — auto-tween to dropped devil fruits and let
 		-- natural collision pickup grab them. Pure passive collection,
@@ -445,56 +443,21 @@ function Module.start(lib)
 		{ name = "Prison",          pos = Vector3.new(4875.3, 5.7, 734.9),     lvlRange = "Lv 250-324" },
 		{ name = "Colosseum",       pos = Vector3.new(-11.3, 29.3, 2771.5),    lvlRange = "PvP"        },
 		{ name = "Magma Village",   pos = Vector3.new(-5247.7, 12.9, 8504.9),  lvlRange = "Lv 325-449" },
-		{ name = "Underwater City", pos = Vector3.new(61165.2, 0.2, 1897.4),   lvlRange = "Lv 450-624" },
+		{ name = "Underwater City", pos = Vector3.new(61165.2, 0.2, 1897.4),   lvlRange = "Lv 450-624", portal = "UnderwaterExit" },
 		{ name = "Fountain City",   pos = Vector3.new(5127.1, 59.5, 4105.4),   lvlRange = "Lv 625-749" },
 	}
 
 	local ISLAND_BY_NAME = {}
 	for _, i in ipairs(ISLANDS) do ISLAND_BY_NAME[i.name] = i end
 
-	-- BF's cross-sea portal lives at workspace.Map.TeleportSpawn — two paired
-	-- BaseParts with server-side Touched handlers. Stepping on the entry part
-	-- yanks the player to the exit part via SetPrimaryPartCFrame on the server,
-	-- which the anti-cheat trusts because the *server* did the move. No remote
-	-- to fire — touch is the protocol.
-	-- The old code path fired CommF_:requestEntrance which never actually
-	-- triggered the TP (verified via remote spy — that handler doesn't exist
-	-- for this portal). Result: tween fell through to a 60K-stud cross-sea
-	-- crawl that takes ~10 minutes.
-	-- Coords are live-looked-up from workspace.Map.TeleportSpawn when present;
-	-- the hardcoded fallbacks below were captured from a 2026-06 probe and act
-	-- as a safety net if BF moves the parts.
-	-- Naming is counterintuitive in the live game data:
-	--   "Entrance"      = Sea 1 trigger Part   (HAS TouchInterest)
-	--   "Exit"          = Sea 2 trigger Part   (HAS TouchInterest, doubles as the return portal)
-	--   "EntrancePoint" = Sea 2 landing marker (NO TouchInterest, just a coord)
-	--   "ExitPoint"     = Sea 1 landing marker (NO TouchInterest, just a coord)
-	-- Verified via live probe — touching EntrancePoint/ExitPoint does nothing.
-	local SEA_PORTAL_FALLBACK = {
-		sea1to2 = { entry = Vector3.new(4050, -2, -1814), exit = Vector3.new(61163, 11, 1819) },
-		sea2to1 = { entry = Vector3.new(61170, -2, 1952), exit = Vector3.new(3864, 6, -1927)  },
-	}
-	local function _liveSeaPortal()
-		local tp = workspace:FindFirstChild("Map") and workspace.Map:FindFirstChild("TeleportSpawn")
-		if not tp then return SEA_PORTAL_FALLBACK end
-		local function pos(n) local p = tp:FindFirstChild(n); return p and p:IsA("BasePart") and p.Position end
-		return {
-			sea1to2 = { entry = pos("Entrance")      or SEA_PORTAL_FALLBACK.sea1to2.entry,
-			            exit  = pos("EntrancePoint") or SEA_PORTAL_FALLBACK.sea1to2.exit  },
-			sea2to1 = { entry = pos("Exit")          or SEA_PORTAL_FALLBACK.sea2to1.entry,
-			            exit  = pos("ExitPoint")     or SEA_PORTAL_FALLBACK.sea2to1.exit  },
-		}
-	end
-	-- Sea 1 lives roughly in |X| < 30000; Sea 2 (Underwater City + Sea 2 islands)
-	-- sits at X ≈ 60000-62000. Z separates regions inside a sea but doesn't
-	-- straddle the sea boundary, so X-magnitude is the safest discriminator.
-	local function _whichSea(pos) return math.abs(pos.X) > 30000 and 2 or 1 end
-
-	-- Intra-Sea-1 sub-zone portals (sky pathway etc). Kept on the old CommF_
-	-- path because they're cheap to retry and the existing code handles
-	-- Skylands sub-zone arrival correctly.
+	-- BF portal pads. Stand on/near the pad position, fire CommF_:requestEntrance
+	-- with that Vector3, and the server completes the warp through the linked
+	-- portal — same path the Portal Fruit / Sea Portal uses. Server-authorized,
+	-- no rollback. The pad is where the PLAYER must be; destination is the
+	-- island's pos in ISLANDS above.
 	local PORTAL_PADS = {
-		Sky3Exit = Vector3.new(-4607, 874, -1667),  -- sky portal (Skylands variant)
+		UnderwaterExit = Vector3.new(4050, -1, -1814),    -- surface pad → Underwater City
+		Sky3Exit       = Vector3.new(-4607, 874, -1667),  -- sky portal (Skylands variant)
 	}
 
 	-- Generic sub-zone discovery: returns the spawn centroid for a mob.
@@ -677,50 +640,6 @@ function Module.start(lib)
 		end
 	end
 
-	-- Portal-touch helper. Drops the character on the cross-sea trigger Part
-	-- and spam-CFrames for ~1.5s (or until sea index flips). Verified live
-	-- to cross in ~550ms when nothing else is moving HRP. Returns true on
-	-- crossover.
-	local function _crossSeaPortal(hrp, fromSea, toSea)
-		local portals = _liveSeaPortal()
-		local portal  = (fromSea == 1) and portals.sea1to2 or portals.sea2to1
-		local ch = hrp.Parent
-
-		-- Kill body movers so flight/dash residuals don't pull us off.
-		for _, c in ipairs(hrp:GetChildren()) do
-			if c:IsA("BodyMover") or c:IsA("BodyVelocity") or c:IsA("BodyPosition")
-			   or c:IsA("BodyGyro") or c:IsA("LinearVelocity") or c:IsA("AlignPosition")
-			   or c:IsA("VectorForce") then
-				pcall(function() c:Destroy() end)
-			end
-		end
-		local hum = ch and ch:FindFirstChildOfClass("Humanoid")
-		if hum then hum.Sit = false; hum.PlatformStand = false end
-
-		-- Spam-snap on the trigger Part for up to 1.5s.
-		for _ = 1, 30 do
-			pcall(function()
-				hrp.CFrame = CFrame.new(portal.entry)
-				hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-			end)
-			task.wait(0.05)
-			if _whichSea(hrp.Position) == toSea then
-				pcall(function() hrp.CFrame = hrp.CFrame + Vector3.new(0, 8, 0) end)
-				return true
-			end
-		end
-		-- Touched event sometimes lands between checks — final short poll.
-		local t0 = tick()
-		while tick() - t0 < 1.5 do
-			task.wait(0.1)
-			if _whichSea(hrp.Position) == toSea then
-				pcall(function() hrp.CFrame = hrp.CFrame + Vector3.new(0, 8, 0) end)
-				return true
-			end
-		end
-		return false
-	end
-
 	local function _tweenHRPTo(hrp, destPos, opts)
 		opts = opts or {}
 		local speed         = opts.speed         or TP_TWEEN_SPEED
@@ -728,29 +647,6 @@ function Module.start(lib)
 		local maxRetries    = opts.retries        or 2
 
 		if activeTween then pcall(function() activeTween:Cancel() end) end
-
-		-- Cross-sea? Route through the touch portal first. Callers like
-		-- the post-respawn return path and fruit sniper hit this whenever
-		-- they need to cross the 60K-stud sea gap. Without this they'd
-		-- segment-tween the full distance (~10 minutes); with it, they
-		-- portal-jump in ~1s and the final tween handles the short hop.
-		-- Skip the portal hop when caller explicitly disables it (already
-		-- in a portal sequence, sub-zone snap, etc.).
-		if not opts.skipPortal then
-			local fromSea = _whichSea(hrp.Position)
-			local toSea   = _whichSea(destPos)
-			if fromSea ~= toSea then
-				-- Get within ~800 studs of the portal first (anti-cheat tolerates
-				-- short snaps; longer ones trip CheckTeleportGlitchFix).
-				local portals = _liveSeaPortal()
-				local entry = ((fromSea == 1) and portals.sea1to2 or portals.sea2to1).entry
-				if (hrp.Position - entry).Magnitude > 800 then
-					_tweenHRPTo(hrp, entry, { skipPortal = true, speed = speed, retries = 1 })
-				end
-				_crossSeaPortal(hrp, fromSea, toSea)
-				-- Fall through to normal tween for the remaining distance.
-			end
-		end
 
 		local destCF = CFrame.new(destPos, destPos - Vector3.new(0, 0, 1))
 		local dist = (destPos - hrp.Position).Magnitude
@@ -787,79 +683,19 @@ function Module.start(lib)
 		cfg.autoFarmLevel = false
 		_stopFlightFn()
 
-		-- Cross-sea? Tween to the touch portal in our current sea, let the
-		-- server's Touched handler do the 60K-stud jump. ~1-2 seconds vs
-		-- ~10 minutes for a direct cross-sea tween.
-		--
-		-- The portal protocol (verified via live probe 2026-06):
-		--   1. Disable everything that moves HRP (farm/flight/sniper already
-		--      off above; also need to kill BodyMovers because Touched needs
-		--      our position to STICK on the trigger Part for a few frames).
-		--   2. Tween near the portal entry.
-		--   3. Spam-write hrp.CFrame to the trigger Part position for ~1.5s.
-		--      A single CFrame gets rolled back by anti-cheat before the
-		--      server sees us at the trigger; repeated writes force the
-		--      position to replicate. (Single-snap test took 4s with no
-		--      crossover; spammed test crossed in 552ms.)
-		--   4. The server's :Touched handler fires, CFrames us to the exit
-		--      landing marker on the other sea side.
-		--   5. Poll for the sea-index flip to confirm.
-		local playerSea = _whichSea(hrp.Position)
-		local destSea   = _whichSea(island.pos)
-		if playerSea ~= destSea then
-			local portals = _liveSeaPortal()
-			local portal  = (playerSea == 1) and portals.sea1to2 or portals.sea2to1
-
-			-- Get us within ~800 studs first so the spam-snap doesn't
-			-- trigger CheckTeleportGlitchFix.
-			if (hrp.Position - portal.entry).Magnitude > 800 then
-				_tweenHRPTo(hrp, portal.entry)
-			end
-
-			-- Kill BodyMovers so flight/dash residuals don't pull us off.
-			for _, c in ipairs(hrp:GetChildren()) do
-				if c:IsA("BodyMover") or c:IsA("BodyVelocity") or c:IsA("BodyPosition")
-				   or c:IsA("BodyGyro") or c:IsA("LinearVelocity") or c:IsA("AlignPosition")
-				   or c:IsA("VectorForce") then
-					pcall(function() c:Destroy() end)
-				end
-			end
-			local hum = ch:FindFirstChildOfClass("Humanoid")
-			if hum then hum.Sit = false; hum.PlatformStand = false end
-
-			-- Spam-snap on the trigger Part. Bail early on sea crossover.
-			local crossed = false
-			for i = 1, 30 do
-				pcall(function()
-					hrp.CFrame = CFrame.new(portal.entry)
-					hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-				end)
-				task.wait(0.05)
-				if _whichSea(hrp.Position) == destSea then crossed = true; break end
-			end
-			-- Final short poll if the snap loop finished without seeing the
-			-- crossover (touched event may land between checks).
-			if not crossed then
-				local t0 = tick()
-				while tick() - t0 < 1.5 do
-					task.wait(0.1)
-					if _whichSea(hrp.Position) == destSea then crossed = true; break end
-				end
-			end
-			-- Bump up a few studs at the exit so we don't immediately walk back
-			-- onto the return portal (Sea 2 trigger is ~70 studs from Sea 1 landing).
-			if crossed then
-				pcall(function() hrp.CFrame = hrp.CFrame + Vector3.new(0, 8, 0) end)
-			end
-		end
-
-		-- Intra-sea sub-zone portal (Skylands sky pathway etc).
+		-- Portal-fronted destination: tween to the pad, fire requestEntrance,
+		-- let the server finish the warp.
 		if island.portal and PORTAL_PADS[island.portal] then
 			local padPos = PORTAL_PADS[island.portal]
 			_tweenHRPTo(hrp, padPos + Vector3.new(0, 4, 0))
 			safe(function() R.CommF_:InvokeServer("requestEntrance", padPos) end)
-			pcall(function() hrp.CFrame = hrp.CFrame + Vector3.new(0, 50, 0) end)
-			task.wait(1.5)
+			-- Bump up 50 studs so we don't immediately re-trigger the same pad
+			hrp.CFrame = hrp.CFrame + Vector3.new(0, 50, 0)
+			task.wait(1.5)  -- server completes portal warp
+
+			-- Post-portal sub-zone discovery is handled by autoFarmLevelLoop
+			-- (which knows the active quest mob). tpToIsland only places us at
+			-- the portal exit; the next farm tick scans live spawns and snaps.
 		else
 			local landingPos = island.pos + Vector3.new(0, 4, 0)
 			_tweenHRPTo(hrp, landingPos)
@@ -2284,146 +2120,91 @@ function Module.start(lib)
 	end
 
 	-- ═══════════════════════════ ABILITY ROTATION ═══════════════════════════
-	-- BF binds Z/X/C/V/F to a ContextActionService handler defined in
-	-- ReplicatedStorage.FruitClient ("casFunc"). It exposes the handler as
-	-- _G.casFunc once a fruit is equipped — see FruitClient line 951.
-	-- We invoke it the same way MobileUIController does (line 604):
-	--   _G.casFunc("DevilFruit", Enum.UserInputState.Begin, fakeInput, KeyCode)
-	-- This skips VirtualInputManager entirely (no UI-focus side effects, no
-	-- Mouse.Hit dependency, no character teleport on Z-dash).
-	--
-	-- For directional aim:
-	--   - mob target: rotate HRP to face current enemy BEFORE firing,
-	--     so the look-vector points at the mob. Restore AutoRotate after.
-	--   - player target: set LocalPlayer:SetAttribute("AAIM", true) — the
-	--     game's own auto-aim picks the nearest player automatically.
-	--
-	-- Sword/race skills don't bind through casFunc; they use their own
-	-- per-tool handlers. Auto-abilities here only covers fruit Z/X/C/V/F.
+	-- BF's ability protocol (from FruitClient decompiled source):
+	--   1. tool.RemoteEvent:FireServer(true)      — signals "activation start"
+	--   2. Write tool.MousePos.Value = targetPos   — target for position-based skills
+	--   3. tool.RemoteEvent:FireServer(targetPos)  — sends Vector3 target
+	-- OR for CFrame abilities:
+	--   3. tool.RemoteEvent:FireServer(CFrame)     — sends Mouse.Hit CFrame
+	-- The Holding BoolValue on the tool flags sustained activation.
+	-- RemoteFunction on the tool is for M1 combat, NOT abilities.
 	local SLOT_NAMES = { "Z", "X", "C", "V", "F" }
-	local KEYCODE = {
-		Z = Enum.KeyCode.Z, X = Enum.KeyCode.X,
-		C = Enum.KeyCode.C, V = Enum.KeyCode.V,
-		F = Enum.KeyCode.F,
-	}
-
-	-- Fruit fire path: BF's mobile UI calls _G.casFunc("DevilFruit", Begin, input, kc).
-	local function fireFruitAbility(slot)
-		local fn = rawget(_G, "casFunc")
-		if type(fn) ~= "function" then return false end
-		local kc = KEYCODE[slot]
-		if not kc then return false end
-		local input = {
-			UserInputState = Enum.UserInputState.Begin,
-			UserInputType  = Enum.UserInputType.Keyboard,
-			KeyCode        = kc,
-		}
-		return pcall(fn, "DevilFruit", Enum.UserInputState.Begin, input, kc)
-	end
-
-	-- Sword fire path — the FULL ritual matters. Verified via remote spy +
-	-- live damage test 2026-06 (Bisento Z dealt 423 dmg → killed a Fishman
-	-- Commando). The decompiled Bisento Tool LocalScript shows the move is
-	-- gated by tool.Holding.Value — the server requires the Hold-spam-release
-	-- sequence to register the swing, not just a one-shot FireServer+Invoke.
-	--
-	-- Sequence:
-	--   1. Holding.Value = true       (signals "key down")
-	--   2. MousePos.Value = target    (write target before position fires)
-	--   3. FireServer(target) x5 at 50ms  (server needs multiple position frames
-	--                                      to validate target — single fire gets
-	--                                      ignored as "no charge time")
-	--   4. Holding.Value = false      (signals "key released")
-	--   5. InvokeServer(slot)         (the actual damage trigger)
-	--   6. FireServer(false)          (cleanup signal — release follow-up)
-	local function fireToolAbility(slot, targetPos)
-		local ch = LocalPlayer.Character
-		local tool = ch and ch:FindFirstChildOfClass("Tool")
-		if not tool then return false end
-		local re = tool:FindFirstChild("RemoteEvent")
-		local rf = tool:FindFirstChild("RemoteFunction")
-		local mp = tool:FindFirstChild("MousePos")
-		local holding = tool:FindFirstChild("Holding")
-		if not (re and re:IsA("RemoteEvent") and rf and rf:IsA("RemoteFunction")) then
-			return false
-		end
-		if holding and holding:IsA("BoolValue") then holding.Value = true end
-		if mp and mp:IsA("Vector3Value") and targetPos then mp.Value = targetPos end
-		for _ = 1, 5 do
-			pcall(function() re:FireServer(targetPos) end)
-			task.wait(0.05)
-		end
-		if holding and holding:IsA("BoolValue") then holding.Value = false end
-		pcall(function() rf:InvokeServer(slot) end)
-		pcall(function() re:FireServer(false) end)
-		return true
-	end
-
-	local function fireAbility(slot, targetPos)
-		if fireFruitAbility(slot) then return true end
-		return fireToolAbility(slot, targetPos)
-	end
 
 	local function abilityRotationTick()
 		if not cfg.autoFarm then return end
 		local ch = LocalPlayer.Character
-		local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
-		if not hrp then return end
+		local tool = ch and ch:FindFirstChildOfClass("Tool")
+		if not tool then return end
 
-		-- Sync player auto-aim with our config every tick so toggling the UI
-		-- mirrors immediately. AAIM is the in-game flag the skill handler reads.
-		LocalPlayer:SetAttribute("AAIM", cfg.abilityAimPlayers and true or false)
+		local re = tool:FindFirstChild("RemoteEvent")
+		if not re or not re:IsA("RemoteEvent") then return end
+		if re.Name == "EquipEvent" then
+			for _, c in ipairs(tool:GetChildren()) do
+				if c:IsA("RemoteEvent") and c.Name ~= "EquipEvent" and c.Name ~= "LegacyRemoteEvent" then
+					re = c
+					break
+				end
+			end
+		end
 
-		-- Honor on-screen cooldown indicators when available.
+		local legacyRe = tool:FindFirstChild("LegacyRemoteEvent")
+		local targetRe = legacyRe and legacyRe:IsA("RemoteEvent") and legacyRe or re
+
+		local mousePosVal = tool:FindFirstChild("MousePos")
+		local holdingVal = tool:FindFirstChild("Holding")
+
+		local targetPos
+		local enemy = currentTarget
+		if enemy and enemy.Parent then
+			local ehrp = enemy:FindFirstChild("HumanoidRootPart")
+			targetPos = ehrp and ehrp.Position
+		end
+		if not targetPos then
+			local hrp = ch:FindFirstChild("HumanoidRootPart")
+			targetPos = hrp and (hrp.Position + (hrp.CFrame.LookVector * 50))
+		end
+		if not targetPos then return end
+
 		local canFire = {}
 		local pg = LocalPlayer:FindFirstChild("PlayerGui")
 		local mainGui = pg and pg:FindFirstChild("Main")
 		local skillsGui = mainGui and mainGui:FindFirstChild("Skills")
 		local combatFrame = skillsGui and skillsGui:FindFirstChild("Combat")
-		for _, slot in ipairs(SLOT_NAMES) do
-			if cfg.abilitySlots[slot] then
-				local ready = true
-				if combatFrame then
+		if combatFrame then
+			for _, slot in ipairs(SLOT_NAMES) do
+				if cfg.abilitySlots[slot] then
 					local slotFrame = combatFrame:FindFirstChild(slot)
-					local cdFrame = slotFrame and slotFrame:FindFirstChild("Cooldown")
-					if cdFrame and cdFrame.Visible then ready = false end
+					if slotFrame then
+						local cdFrame = slotFrame:FindFirstChild("Cooldown")
+						if not cdFrame or not cdFrame.Visible then
+							table.insert(canFire, slot)
+						end
+					else
+						table.insert(canFire, slot)
+					end
 				end
-				if ready then table.insert(canFire, slot) end
 			end
-		end
-		if #canFire == 0 then return end
-
-		-- Resolve target position. Sword fires take an explicit Vector3; fruit fires
-		-- use look-vector (so we still rotate HRP for fruit case).
-		local mob = currentTarget
-		local mobHrp = mob and mob.Parent and mob:FindFirstChild("HumanoidRootPart")
-		local targetPos
-		if mobHrp then
-			targetPos = mobHrp.Position
 		else
-			targetPos = hrp.Position + (hrp.CFrame.LookVector * 30)
-		end
-
-		local restoreAuto
-		if cfg.abilityAimMobs and mobHrp then
-			restoreAuto = true
-			local hum = ch:FindFirstChildOfClass("Humanoid")
-			if hum then hum.AutoRotate = false end
-			local p = hrp.Position
-			local t = Vector3.new(mobHrp.Position.X, p.Y, mobHrp.Position.Z)
-			hrp.CFrame = CFrame.new(p, t)
+			for _, slot in ipairs(SLOT_NAMES) do
+				if cfg.abilitySlots[slot] then
+					table.insert(canFire, slot)
+				end
+			end
 		end
 
 		for _, slot in ipairs(canFire) do
-			safe(function() fireAbility(slot, targetPos) end)
-			task.wait(0.05)
-		end
-
-		if restoreAuto then
-			task.delay(0.2, function()
-				local hum = ch:FindFirstChildOfClass("Humanoid")
-				if hum then hum.AutoRotate = true end
+			safe(function()
+				if mousePosVal and mousePosVal:IsA("Vector3Value") then
+					mousePosVal.Value = targetPos
+				end
+				targetRe:FireServer(true)
+				targetRe:FireServer(targetPos)
+				if holdingVal and holdingVal:IsA("BoolValue") then
+					holdingVal.Value = true
+					task.delay(0.15, function() holdingVal.Value = false end)
+				end
 			end)
+			task.wait(0.05)
 		end
 	end
 
@@ -2830,12 +2611,6 @@ function Module.start(lib)
 		function(v) cfg.abilityCadence = v end,
 		{ min = 0.5, max = 10, step = 0.1,
 		  format = function(v) return string.format("%.1fs", v) end })
-	ui.toggleRow(farm, "Aim at mobs (rotate to face)",
-		function() return cfg.abilityAimMobs end,
-		function(v) cfg.abilityAimMobs = v end)
-	ui.toggleRow(farm, "Auto-aim players (PvP)",
-		function() return cfg.abilityAimPlayers end,
-		function(v) cfg.abilityAimPlayers = v end)
 
 	ui.sectionLabel(farm, "TARGET FILTER")
 	ui.sliderRow(farm, "Min enemy level",
