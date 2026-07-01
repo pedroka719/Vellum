@@ -190,15 +190,14 @@ Cross-sea threshold: `|player.X| > 30000` is Sea 2, else Sea 1. Sea 3 not yet ma
 - **Auto-unlock router** — kinds: `boss`, `mastery`, `quest`, `fragment`, `race`. Cancel toggle works, prereq metadata in shop rows.
 - **Logia immunity guard** — behavioral detection via `PlayerGui.Notifications.ChildAdded` scanner. Flips `_hasBuso=false` on "immune to physical" match, skips Logia mobs until user confirms Buso.
 - **ESP** — players, chests, fruits, bosses, quest mob. Uses `lib/esp.lua` card builder.
-- **Island TPs (Sea 1)** — direct tween to `ISLANDS` atlas coords. Fast for same-sea, painfully slow for cross-sea (see bugs).
+- **Island TPs (Sea 1)** — direct tween to `ISLANDS` atlas coords. `_tweenHRPTo` holds the whole body non-collidable for the entire tween (BF re-enables `CanCollide` on its own the moment we stop forcing it), so TPs glide through island geometry instead of wedging the player under the island at sea level. Fast for same-sea, painfully slow for cross-sea (see bugs).
 - **Weapon auto-equip** — basic `ToolTip` match. Falls through Melee → Sword → Gun → Blox Fruit priority.
+- **Auto-abilities (Z/X/C/V/F)** — WORKS as of `7c9c8b5`/`0359bdc`. Per-slot toggles + cadence slider. The tick fires `tool.RemoteEvent:FireServer(targetPos)` then `tool.RemoteFunction:InvokeServer(key)` — the exact sequence the weapon's own key handler uses (read out of `Bisento.Tool`, live-verified: one Z on a Galley Captain = 2160 dmg; ~825 dmg mid-farm). Runs in its own `abilityRotationLoop`, so `InvokeServer`'s yield never serializes M1. **Zero HRP CFrame writes** — that (not the fire itself) was the anti-cheat trip in every earlier kick. Only fires slots the equipped weapon actually has, read from `PlayerGui.Main.Skills.<toolName>` (Bisento → Z, X). Aims at `currentTarget` (farm) or the nearest live enemy ≤250 studs; returns without firing if nothing's in range, so it never burns cooldowns on empty water.
 
 ### Broken / not working
 
-- **Auto-abilities (Z/X/C/V/F)** — 4 rewrites all failed in different ways. Protocol verified correct via spy (deals damage). Loop plumbing keeps having issues: separate coroutine silently dies, inline-in-attackOnce serializes M1, parallel spawn-per-fire got the session kicked (suspected: HRP CFrame writes + rapid FireServer spam triggering `CheckTeleportGlitchFix`). Currently reverted, no ability code active.
-- **Cross-sea TP** — protocol was live-verified to cross Sea 2 → Sea 1 in 552ms in isolation. Integration into `_tweenHRPTo` caused oscillation kicks (spam-CFrame ran even when already in target sea, positions rolled back, anti-cheat flagged). Currently reverted, back to slow segmented tween across the 60K-stud gap.
+- **Cross-sea TP** — protocol was live-verified to cross Sea 2 → Sea 1 in 552ms in isolation. Integration into `_tweenHRPTo` caused oscillation kicks (spam-CFrame ran even when already in target sea, positions rolled back, anti-cheat flagged). Currently reverted, back to slow segmented tween across the 60K-stud gap. (Independent of the tween-noclip fix above — that only touches collision, not sea membership.)
 - **Weapon drop hijack** — `ensureWeaponEquipped` matches by ToolTip, so if you have Bisento equipped and pick up a Trident (both "Sword" ToolTip), the next respawn's re-equip can grab Trident instead. Attempted a "lock current weapon" toggle and a hotbar-slot-scan design; both introduced UX regressions.
-- **Boss-first activation** — LO reported that on script start, the autofarm sometimes runs a boss quest before regular mob tier. `pickQuest` looks correct on paper (walks atlas, filters bosses when `skipBossQuests` on) — likely a level-range edge case at activation moment. Reproducer needed.
 
 ### Deferred (see `ROADMAP.md`)
 
@@ -214,6 +213,22 @@ Cross-sea threshold: `|player.X| > 30000` is Sea 2, else Sea 1. Sea 3 not yet ma
 - Theme customization
 
 ---
+
+## Session log — 2026-07-01 (fixes shipped, all live-verified)
+
+Worked directly on the connected client via the MCP — probed, fixed, pushed, re-probed. Three long-standing bugs closed:
+
+- **Auto-abilities now cast** (`7c9c8b5`, refined `0359bdc`). Root cause: the tick fired the tool's RemoteEvent but **never called `RemoteFunction:InvokeServer(key)`** — the actual skill trigger. The old code comment literally claimed "RemoteFunction is for M1, NOT abilities," which was backwards. Fix mirrors the tool's own key handler: `RemoteEvent:FireServer(pos)` + `RemoteFunction:InvokeServer(key)`. Remote spy confirmed it fires with args `"Z"`/`"X"`; damage confirmed (2160 isolated, ~825 mid-farm). The earlier "abilities don't fire" reports were really the farm-position bug below — stranded with no mob in range, every cast hit water.
+- **Auto-unlock stopped spinning forever** (`7c9c8b5`). Root cause: `BuyItem` returns `1`=bought, `0`=**not enough Beli**, `2`=**already own** (confirmed from decompiled shop dialogue). The code treated `0` as success and `2` as failure, so on an account that already owned Buso (`BuyItem "Buso"` → 2) the poller never recognized completion and just left auto-farm-level running. Now: try the buy first, stop on 1/2, and tell a level wall from a price wall.
+- **Farm TP fixed** (`41c7f4b`). Two sub-bugs: (a) `applyQuestFilters` ran at the *bottom* of `autoFarmLevelLoop`, leaving a window where `autoFarm` was on but `farmTargetName` was `""` → `pickEnemy` fell back to nearest enemy → flew to the **Cyborg boss** sharing Fountain City's sub-zone despite skip-boss. Now the filter locks right after `pickQuest`. (b) `tpToIsland` drops flight and re-enables `CanCollide`, then `_tweenHRPTo` dragged a solid body through island geometry → rollback / wedged under the island at Y=2. `_tweenHRPTo` now noclips the whole body for the tween.
+
+### New verified facts (trust these over older notes)
+
+- **Sword ability protocol IS `tool.RemoteFunction:InvokeServer(<key>)`** after a `tool.RemoteEvent:FireServer(<targetPos>)`. This is the whole trigger. Supersedes any note calling the tool RemoteFunction "M1-only."
+- **Skill HUD lives at `PlayerGui.Main.Skills.<toolName>.<slot>`** (e.g. `Main.Skills.Bisento.Z`), NOT `Main.Skills.Combat.*` (that path does not exist). The weapon frame only exists while the weapon is equipped, and its single-char children (`Z`,`X`,…) are exactly the slots that weapon has — use this to know which slots to fire.
+- **The skill `.Cooldown` frame is NOT a readable cooldown signal** — its `.Visible` is always `true` and it has no legible fill child. Don't gate on it; let the server no-op on-cooldown fires.
+- **Firing `InvokeServer` for a key the weapon lacks returns instantly** (~0.05s), no hang — harmless.
+- **`BuyItem` codes: 1=bought, 0=not enough Beli, 2=already own.**
 
 ## Recent session log — 2026-06-30 to 2026-07-01
 
@@ -241,18 +256,16 @@ Cross-sea threshold: `|player.X| > 30000` is Sea 2, else Sea 1. Sea 3 not yet ma
 
 ### Current file state
 
-`games/blox_fruits.lua` is at commit `eee1a89` (byte-identical to `0959589`). All ability rewrites reverted. All cross-sea portal work reverted. This is the last version LO tested as stable.
+`games/blox_fruits.lua` is at commit `0359bdc`. Auto-abilities, auto-unlock, and the farm TP / quest-filter bugs are all fixed and live-verified against the connected client (Mys7iczstone). These sit on top of the old stable `eee1a89`.
 
-`git log --oneline -8`:
+`git log --oneline -6`:
 ```
+0359bdc fix(abilities): only fire slots the equipped weapon actually has
+41c7f4b fix(farm): noclip through TP tweens, lock quest filter before travel
+7c9c8b5 fix(abilities+shop): cast via RemoteFunction, correct BuyItem codes
+fff9f04 docs: rewrite AGENTS.md — current state, learnings, framing for future AIs
 eee1a89 revert: blox_fruits.lua all the way back to 0959589 — cross-sea code was buggy
 0614bbb revert: back to 29275d2 — new ability master loop caused a kick
-1854593 feat(abilities): clean parallel-coroutine design — never blocks M1
-29275d2 revert: blox_fruits.lua back to dda1b55 — abilities+equip experiments not worth it
-c3a7f19 feat(equip): hotbar-slot scan + last-equipped memory + hotkey press
-b782b79 revert: lock-current-weapon toggle
-b0b4c2b fix(abilities+equip): inline ability fire + lock current weapon toggle
-57b08e5 fix(abilities): self-pick closest mob
 ```
 
 ---
