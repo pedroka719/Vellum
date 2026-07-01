@@ -1602,20 +1602,42 @@ function Module.start(lib)
 	--   npcKey   — kept in the signature for future-proofing / logging
 	--   item     — exact item string the server expects ("Triple Katana")
 	--   displayName — for the toast (defaults to item)
-	-- Returns true on success (server returned 0 or 1).
+	-- Returns true once the item is owned (server code 1 = bought, 2 = already own).
+	-- Server's own Level accessor — used to tell a level-gate from a price-gate.
+	local function _playerLevel()
+		local data = LocalPlayer:FindFirstChild("Data")
+		local lvl = data and data:FindFirstChild("Level")
+		return lvl and lvl.Value or nil
+	end
+
+	-- BuyItem return codes, straight from the decompiled shop dialogue:
+	--   1 = purchased, 0 = not enough Beli, 2 = already own, anything else =
+	-- unavailable/gone. Returns the number, or nil if the remote itself errored.
+	-- The old code treated 0 (broke!) as success and 2 (owned) as failure —
+	-- that's why "Auto-unlock Buso" span forever on an account that owned it.
+	local function _buyItemCode(item)
+		local ok, res = pcall(function()
+			return R.CommF_:InvokeServer("BuyItem", item)
+		end)
+		if not ok then return nil end
+		return tonumber(res)
+	end
+
 	local function shopBuy(npcKey, item, displayName)
 		Toast.show({
 			title = "Buying", body = (displayName or item),
 			kind = "info", duration = 2, key = "shop:" .. item,
 		})
-		local ok, res = pcall(function()
-			return R.CommF_:InvokeServer("BuyItem", item)
-		end)
-		local resStr = tostring(res)
-		local success = ok and (resStr == "0" or resStr == "1")
+		local code = _buyItemCode(item)
+		local success = (code == 1 or code == 2)
+		local body
+		if code == 1 then     body = displayName or item
+		elseif code == 2 then body = (displayName or item) .. "  •  already owned"
+		elseif code == 0 then body = (displayName or item) .. "  •  not enough Beli"
+		else                  body = (displayName or item) .. "  •  locked / unavailable" end
 		Toast.show({
 			title = success and "Bought" or "Buy failed",
-			body  = (displayName or item) .. (success and "" or ("  •  code " .. resStr)),
+			body  = body,
 			kind  = success and "success" or "warn", duration = 4,
 			key   = "shop:done:" .. item,
 		})
@@ -2120,25 +2142,50 @@ function Module.start(lib)
 	end
 
 	-- ═══════════════════════════ ABILITY ROTATION ═══════════════════════════
-	-- BF's ability protocol (from FruitClient decompiled source):
-	--   1. tool.RemoteEvent:FireServer(true)      — signals "activation start"
-	--   2. Write tool.MousePos.Value = targetPos   — target for position-based skills
-	--   3. tool.RemoteEvent:FireServer(targetPos)  — sends Vector3 target
-	-- OR for CFrame abilities:
-	--   3. tool.RemoteEvent:FireServer(CFrame)     — sends Mouse.Hit CFrame
-	-- The Holding BoolValue on the tool flags sustained activation.
-	-- RemoteFunction on the tool is for M1 combat, NOT abilities.
+	-- BF's ability protocol, read straight out of the equipped tool's own
+	-- LocalScript (Bisento.Tool, the KeyCode.Z handler) and verified live —
+	-- FireServer(pos) + InvokeServer("Z") dealt 2160 dmg in a single hit:
+	--   1. tool.RemoteEvent:FireServer(targetPos)  — the same Vector3 as Mouse.Hit.p
+	--   2. tool.RemoteFunction:InvokeServer(key)    — THE actual skill trigger
+	-- The old code fired the RemoteEvent but never invoked the RemoteFunction,
+	-- so nothing ever cast. InvokeServer(key) is the whole ballgame — not
+	-- "M1 only" as a previous note wrongly claimed.
 	local SLOT_NAMES = { "Z", "X", "C", "V", "F" }
 
+	-- Where to aim: the live farm target if we have one, otherwise the closest
+	-- breathing enemy within reach. Returns nil when there's nothing to hit so
+	-- we don't burn cooldowns casting into empty air.
+	local function abilityTargetPos(ch)
+		local enemy = currentTarget
+		if enemy and enemy.Parent then
+			local ehrp = enemy:FindFirstChild("HumanoidRootPart")
+			if ehrp then return ehrp.Position end
+		end
+		local hrp = ch:FindFirstChild("HumanoidRootPart")
+		local enemies = workspace:FindFirstChild("Enemies")
+		if not (hrp and enemies) then return nil end
+		local bestPos, bestD
+		for _, m in ipairs(enemies:GetChildren()) do
+			local ehrp = m:FindFirstChild("HumanoidRootPart")
+			local hum = m:FindFirstChildOfClass("Humanoid")
+			if ehrp and hum and hum.Health > 0 then
+				local d = (ehrp.Position - hrp.Position).Magnitude
+				if d <= 250 and (not bestD or d < bestD) then bestD = d; bestPos = ehrp.Position end
+			end
+		end
+		return bestPos
+	end
+
 	local function abilityRotationTick()
-		if not cfg.autoFarm then return end
 		local ch = LocalPlayer.Character
 		local tool = ch and ch:FindFirstChildOfClass("Tool")
 		if not tool then return end
 
+		-- Resolve the tool's real activation RemoteEvent. Some tools name the
+		-- primary event literally "RemoteEvent"; others hide it behind EquipEvent.
 		local re = tool:FindFirstChild("RemoteEvent")
-		if not re or not re:IsA("RemoteEvent") then return end
-		if re.Name == "EquipEvent" then
+		if re and re.Name == "EquipEvent" then re = nil end
+		if not (re and re:IsA("RemoteEvent")) then
 			for _, c in ipairs(tool:GetChildren()) do
 				if c:IsA("RemoteEvent") and c.Name ~= "EquipEvent" and c.Name ~= "LegacyRemoteEvent" then
 					re = c
@@ -2146,65 +2193,24 @@ function Module.start(lib)
 				end
 			end
 		end
+		local rf = tool:FindFirstChild("RemoteFunction")
+		if not (re and rf and rf:IsA("RemoteFunction")) then return end
 
-		local legacyRe = tool:FindFirstChild("LegacyRemoteEvent")
-		local targetRe = legacyRe and legacyRe:IsA("RemoteEvent") and legacyRe or re
-
-		local mousePosVal = tool:FindFirstChild("MousePos")
-		local holdingVal = tool:FindFirstChild("Holding")
-
-		local targetPos
-		local enemy = currentTarget
-		if enemy and enemy.Parent then
-			local ehrp = enemy:FindFirstChild("HumanoidRootPart")
-			targetPos = ehrp and ehrp.Position
-		end
-		if not targetPos then
-			local hrp = ch:FindFirstChild("HumanoidRootPart")
-			targetPos = hrp and (hrp.Position + (hrp.CFrame.LookVector * 50))
-		end
+		local targetPos = abilityTargetPos(ch)
 		if not targetPos then return end
 
-		local canFire = {}
-		local pg = LocalPlayer:FindFirstChild("PlayerGui")
-		local mainGui = pg and pg:FindFirstChild("Main")
-		local skillsGui = mainGui and mainGui:FindFirstChild("Skills")
-		local combatFrame = skillsGui and skillsGui:FindFirstChild("Combat")
-		if combatFrame then
-			for _, slot in ipairs(SLOT_NAMES) do
-				if cfg.abilitySlots[slot] then
-					local slotFrame = combatFrame:FindFirstChild(slot)
-					if slotFrame then
-						local cdFrame = slotFrame:FindFirstChild("Cooldown")
-						if not cdFrame or not cdFrame.Visible then
-							table.insert(canFire, slot)
-						end
-					else
-						table.insert(canFire, slot)
-					end
-				end
+		-- Fire each enabled slot the way the tool's own key handler does. No HRP
+		-- CFrame writes here on purpose — the anti-cheat flags concurrent CFrame
+		-- + FireServer, never the fire itself. Keys the weapon lacks return
+		-- instantly (server no-op), so a stray toggle costs nothing.
+		for _, slot in ipairs(SLOT_NAMES) do
+			if cfg.abilitySlots[slot] then
+				safe(function()
+					re:FireServer(targetPos)
+					rf:InvokeServer(slot)
+				end)
+				task.wait(0.05)
 			end
-		else
-			for _, slot in ipairs(SLOT_NAMES) do
-				if cfg.abilitySlots[slot] then
-					table.insert(canFire, slot)
-				end
-			end
-		end
-
-		for _, slot in ipairs(canFire) do
-			safe(function()
-				if mousePosVal and mousePosVal:IsA("Vector3Value") then
-					mousePosVal.Value = targetPos
-				end
-				targetRe:FireServer(true)
-				targetRe:FireServer(targetPos)
-				if holdingVal and holdingVal:IsA("BoolValue") then
-					holdingVal.Value = true
-					task.delay(0.15, function() holdingVal.Value = false end)
-				end
-			end)
-			task.wait(0.05)
 		end
 	end
 
@@ -2817,17 +2823,17 @@ function Module.start(lib)
 		_unlockPollers[item] = true
 		task.spawn(function()
 			local deadline = tick() + 3600  -- 1hr max
+			local gap = 0                   -- first attempt fires immediately
 			while tick() < deadline and _running do
-				task.wait(30)
+				if gap > 0 then task.wait(gap) end
+				gap = 30
 				if not _unlockPollers[item] then break end  -- cancelled
 				if not cfg.autoFarm and not cfg.autoFarmLevel then break end
-				local ok, res = pcall(function()
-					return R.CommF_:InvokeServer("BuyItem", item)
-				end)
-				if ok and (tostring(res) == "0" or tostring(res) == "1") then
+				local code = _buyItemCode(item)
+				if code == 1 or code == 2 then
 					Toast.show({
 						title = "Unlocked!",
-						body  = (displayName or item) .. " — auto-purchased",
+						body  = (displayName or item) .. (code == 2 and " — already owned" or " — auto-purchased"),
 						kind  = "success", duration = 6,
 						key   = "unlock:done:" .. item,
 					})
@@ -2876,19 +2882,49 @@ function Module.start(lib)
 		if not prereq then return end
 		local kind = prereq.kind
 
-		-- LEVEL — set farmLevel range, engage autoFarmLevel, poll
+		-- LEVEL — the server is the authority on lock state, so try the buy
+		-- first. If we already own it (code 2) or can afford it (code 1), we're
+		-- done — no pointless farming. Only when the buy fails do we figure out
+		-- whether the wall is the level (grind levels) or the price (grind Beli).
 		if kind == "level" then
-			cfg.farmLevelMin   = math.max(0, (prereq.value or 0) - 25)
-			cfg.farmLevelMax   = math.max(prereq.value or 0, 9999)
-			cfg.skipBossQuests = true
-			cfg.autoFarmLevel  = true
-			cfg.autoFarm       = true
-			Toast.show({
-				title = "Auto-unlock engaged",
-				body  = "Farming to Lv " .. tostring(prereq.value) .. " for " .. (displayName or item),
-				kind  = "info", duration = 5,
-				key   = "unlock:" .. item,
-			})
+			local code = _buyItemCode(item)
+			if code == 1 or code == 2 then
+				Toast.show({
+					title = code == 2 and "Already owned" or "Unlocked!",
+					body  = (displayName or item) .. (code == 1 and " — purchased" or ""),
+					kind  = "success", duration = 5,
+					key   = "unlock:done:" .. item,
+				})
+				return
+			end
+			local need = prereq.value or 0
+			local lvl  = _playerLevel()
+			if lvl and lvl >= need then
+				-- Level requirement already met — the block is Beli. Keep the
+				-- user's farm band; just run the money grind and poll to buy.
+				cfg.autoFarmLevel = true
+				cfg.autoFarm      = true
+				Toast.show({
+					title = "Auto-unlock engaged",
+					body  = (displayName or item) .. "  •  Lv " .. tostring(lvl) ..
+					        " is enough — farming Beli" .. (code == 0 and " (need more)" or ""),
+					kind  = "info", duration = 6,
+					key   = "unlock:" .. item,
+				})
+			else
+				-- Genuinely under-level: set the farm band and grind up to it.
+				cfg.farmLevelMin   = math.max(0, need - 25)
+				cfg.farmLevelMax   = 9999
+				cfg.skipBossQuests = true
+				cfg.autoFarmLevel  = true
+				cfg.autoFarm       = true
+				Toast.show({
+					title = "Auto-unlock engaged",
+					body  = "Farming to Lv " .. tostring(need) .. " for " .. (displayName or item),
+					kind  = "info", duration = 5,
+					key   = "unlock:" .. item,
+				})
+			end
 			_pollUntilBought(item, displayName)
 			return
 		end
