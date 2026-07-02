@@ -3031,7 +3031,7 @@ function Module.start(lib)
 		if _unlockPollers[item] then return end
 		_unlockPollers[item] = true
 		task.spawn(function()
-			local deadline = tick() + 3600  -- 1hr max
+			local deadline = tick() + 86400  -- 24h safety net; a Lv 1→100+ grind can run for hours
 			local gap = 0                   -- first attempt fires immediately
 			while tick() < deadline and _running do
 				if gap > 0 then task.wait(gap) end
@@ -3123,14 +3123,21 @@ function Module.start(lib)
 			-- (Black Leg, etc.) the user picks on their hotbar themselves.
 			local VALID = { Melee = true, Sword = true, Gun = true, ["Blox Fruit"] = true }
 			if prereq.target and VALID[prereq.target] then cfg.selectedWeapon = prereq.target end
-			cfg.autoFarmLevel = true
-			cfg.autoFarm      = true
+			cfg.skipBossQuests = true
+			cfg.autoFarmLevel  = true
+			cfg.autoFarm       = true
 		elseif kind == "fragment" or kind == "quest" or kind == "boss" then
 			cfg.skipBossQuests = false  -- bosses/quests are where these come from
 			cfg.autoFarmLevel  = true
 			cfg.autoFarm       = true
 		else
-			cfg.autoFarm = true
+			-- No named gate (or a plain Beli price): farm the quest ladder,
+			-- which levels us AND earns Beli, and let the poll buy the moment we
+			-- can afford it. autoFarmLevel beats simple-kill mode — it always has
+			-- a valid target (the current quest mob) instead of hunting blind.
+			cfg.skipBossQuests = true
+			cfg.autoFarmLevel  = true
+			cfg.autoFarm       = true
 		end
 
 		Toast.show({
