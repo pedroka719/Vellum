@@ -19,7 +19,7 @@
 --   For dev, swap BASE to a local override or use a single bundled file
 --   (see TODO at bottom — bundler script not yet written).
 
-local REPO = "Pekenz/vellum"
+local REPO = "Shinigami-V/Vellum"
 local REF  = "main"
 -- BASE is rewritten at boot to pin against the latest commit SHA. Fastly
 -- caches raw.githubusercontent.com/<repo>/main/* by path (querystrings

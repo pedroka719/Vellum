@@ -7,7 +7,7 @@
 -- The full game runs inside start(). lib bundles { theme, helpers, toast, ui }
 -- from the shared modules.
 
-local LOADER_URL = "https://raw.githubusercontent.com/Pekenz/vellum/main/loader.lua"
+local LOADER_URL = "https://raw.githubusercontent.com/Shinigami-V/Vellum/main/loader.lua"
 
 local Module = {
 	name = "Spin a Soccer Card",
