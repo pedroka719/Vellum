@@ -783,8 +783,8 @@ function Module.start(lib)
 	-- are the MINIMUM accept level — lvlMax in each row is set to (next
 	-- tier's lvlMin - 1) so pickQuest's forward scan walks naturally.
 	local SEA1_QUESTS = {
-		{ lvlMin = 1,   lvlMax = 9,   island = "Pirate Starter",  questId = "BanditQuest1",  tier = 1, mob = "Bandit",          taskCount = 5 },
-		{ lvlMin = 1,   lvlMax = 9,   island = "Marine Starter",  questId = "MarineQuest",   tier = 1, mob = "Trainee",         taskCount = 5 },
+		{ lvlMin = 1,   lvlMax = 9,   island = "Pirate Starter",  questId = "BanditQuest1",  tier = 1, mob = "Bandit",          taskCount = 5, faction = "Pirates" },
+		{ lvlMin = 1,   lvlMax = 9,   island = "Marine Starter",  questId = "MarineQuest",   tier = 1, mob = "Trainee",         taskCount = 5, faction = "Marines" },
 		{ lvlMin = 10,  lvlMax = 14,  island = "Jungle",          questId = "JungleQuest",   tier = 1, mob = "Monkey",          taskCount = 6 },
 		{ lvlMin = 15,  lvlMax = 19,  island = "Jungle",          questId = "JungleQuest",   tier = 2, mob = "Gorilla",         taskCount = 8 },
 		{ lvlMin = 20,  lvlMax = 29,  island = "Jungle",          questId = "JungleQuest",   tier = 3, mob = "Gorilla King",    taskCount = 1, boss = true },
@@ -827,10 +827,23 @@ function Module.start(lib)
 	-- range is ALL boss, fall back to the highest-lvlMin non-boss row our
 	-- level still qualifies for — so at Lv 220-249 we keep farming
 	-- Dangerous Prisoners (lvlMin=210) instead of idling for Wardens.
+	-- Skip a quest whose faction doesn't match ours. The Lv 1-9 starter
+	-- quests are faction-locked: a Pirate can only take the Bandit quest at
+	-- Pirate Starter, a Marine only the Trainee quest at Marine Starter.
+	-- Without this the forward scan always lands on Trainee (it's the later
+	-- row) and a fresh Pirate gets dragged 3.7K studs to Marine Starter for a
+	-- quest the NPC won't give. Team.Name is the source of truth ("Pirates" /
+	-- "Marines"); if it's momentarily nil we don't filter (old behaviour).
+	local function _wrongFaction(q)
+		if not q.faction then return false end
+		local t = LocalPlayer.Team
+		return t ~= nil and t.Name ~= q.faction
+	end
+
 	local function pickQuest(level)
 		local best
 		for _, q in ipairs(SEA1_QUESTS) do
-			if level >= q.lvlMin and level <= q.lvlMax then
+			if level >= q.lvlMin and level <= q.lvlMax and not _wrongFaction(q) then
 				if not (cfg.skipBossQuests and q.boss) then
 					best = q
 				end
@@ -843,7 +856,7 @@ function Module.start(lib)
 		if not best and cfg.skipBossQuests then
 			for i = #SEA1_QUESTS, 1, -1 do
 				local q = SEA1_QUESTS[i]
-				if not q.boss and level >= q.lvlMin then
+				if not q.boss and level >= q.lvlMin and not _wrongFaction(q) then
 					best = q
 					break
 				end
