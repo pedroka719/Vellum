@@ -3102,13 +3102,18 @@ function Module.start(lib)
 			if k ~= item then _unlockPollers[k] = nil end
 		end
 
+		-- Clean slate before pointing the farm at this goal. autoFarmLevel
+		-- walks the quest ladder for our CURRENT level, so any leftover level
+		-- or name filter would strand us: a Lv-100 unlock used to set
+		-- farmLevelMin = 75, which at Lv 1 filters out every reachable mob and
+		-- the farm just sits idle. Let the quest progression do the leveling —
+		-- the server's own gate lets the buy through the moment we qualify.
+		cfg.farmLevelMin   = 0
+		cfg.farmLevelMax   = 9999
+		cfg.farmTargetName = ""
+
 		local kind = prereq and prereq.kind
 		if kind == "level" then
-			local need = prereq.value or 0
-			if (_playerLevel() or 0) < need then
-				cfg.farmLevelMin = math.max(0, need - 25)
-				cfg.farmLevelMax = 9999
-			end
 			cfg.skipBossQuests = true
 			cfg.autoFarmLevel  = true
 			cfg.autoFarm       = true
