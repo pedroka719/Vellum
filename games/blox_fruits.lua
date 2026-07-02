@@ -560,6 +560,37 @@ function Module.start(lib)
 		return Vector3.new(sx / n, sy / n, sz / n)
 	end
 
+	-- Ordered list of a mob's static spawn anchors (cached — anchors never
+	-- move). Powers the "walk the spawnpoints" farm behaviour: when the quest
+	-- mob isn't spawned we visit each of ITS anchors in turn (BF only spawns a
+	-- mob when a player is near its anchor), so we sweep the zone until one
+	-- appears and never wander onto a boss or another species. Sorted by X then
+	-- Z so the sweep is a clean pass across the zone, not random hops.
+	local _anchorCache = {}
+	local function spawnAnchorList(mobName)
+		local cached = _anchorCache[mobName]
+		if cached then return cached end
+		local out = {}
+		local origin = workspace:FindFirstChild("_WorldOrigin")
+		local spawns = origin and origin:FindFirstChild("EnemySpawns")
+		if spawns then
+			local prefix = mobName .. " [Lv."
+			for _, p in ipairs(spawns:GetChildren()) do
+				if p:IsA("BasePart") and p.Name:sub(1, #prefix) == prefix then
+					out[#out + 1] = p.Position
+				end
+			end
+			table.sort(out, function(a, b)
+				if a.X ~= b.X then return a.X < b.X end
+				return a.Z < b.Z
+			end)
+		end
+		-- Only cache once the spawns folder has actually streamed in, so an
+		-- early empty read doesn't stick.
+		if #out > 0 then _anchorCache[mobName] = out end
+		return out
+	end
+
 	-- Island TP — pisun-hub pattern, the one that actually works.
 	--
 	-- BF's anti-cheat watches HRP per-frame: it rolls back tweens that finish
@@ -1911,6 +1942,7 @@ function Module.start(lib)
 				Q.kills    = 0
 				Q.current  = nil
 				Q.key      = nil
+				Q.walkIdx  = nil
 				_islandGraceUntil = 0
 				currentTarget = nil
 				targetOriginalY = nil
@@ -2041,95 +2073,72 @@ function Module.start(lib)
 				end
 			end
 
-			-- Generic sub-zone snap: gate by distance to the NEAREST alive
-			-- quest mob, not distance to the centroid. Centroid-gating broke
-			-- on wide zones like Prison's Dangerous Prisoner area (mobs
-			-- spread across 1000+ studs) — chasing the nearest mob put us
-			-- 400+ studs from centroid, snap fired, teleported us back,
-			-- pickEnemy reselected, infinite bumping cycle. Now: if there's
-			-- ANY quest mob within 400 studs of us, we're in the right zone
-			-- and don't snap. Only snap when we're stranded far from every
-			-- spawn (wrong island corner, freshly portal'd, etc).
+			-- Walk the quest mob's spawnpoints (agreed design): only ever go to
+			-- the QUEST mob, never the nearest ANY enemy. If it isn't spawned yet,
+			-- sweep its own spawn anchors one at a time until one appears (BF only
+			-- spawns a mob when a player is near its anchor), so we sweep the zone
+			-- until it shows and never drift onto the Cyborg boss (or any other
+			-- species) that shares the island. Replaces the old centroid-snap,
+			-- which parked us at one averaged point that could sit between anchors,
+			-- out of every spawn's trigger radius.
 			local ch = LocalPlayer.Character
 			local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
 			if hrp then
+				-- Any quest mob alive anywhere? pickEnemy has no distance cap, so
+				-- if one exists autoFarmLoop will chase and kill it.
 				local enemies = workspace:FindFirstChild("Enemies")
-				local nearestDist = math.huge
+				local anyAlive = false
 				if enemies then
 					for _, e in ipairs(enemies:GetChildren()) do
 						if e.Name == quest.mob then
-							local eh = e:FindFirstChild("HumanoidRootPart")
-							local h  = e:FindFirstChild("Humanoid")
-							if eh and h and h.Health > 0 then
-								local d = (eh.Position - hrp.Position).Magnitude
-								if d < nearestDist then nearestDist = d end
-							end
+							local h = e:FindFirstChild("Humanoid")
+							if h and h.Health > 0 then anyAlive = true break end
 						end
 					end
 				end
-				-- Snap to the centroid only when we're genuinely stranded —
-				-- far from every ALIVE quest mob (>400) AND not already sitting
-				-- in the spawn zone. Without the nearQuestSpawn guard the snap
-				-- re-fired every 3s while we waited at an empty spawn (mobs on a
-				-- respawn timer, or the char soft-flagged so the server
-				-- suppresses spawns around us): each fire tore down and rebuilt
-				-- flight and nudged the HRP, thrashing the anti-cheat for no
-				-- reason — which itself can keep the soft-flag hot. Now we only
-				-- snap when actually away from the static spawn anchors.
-				if nearestDist > 400 and not nearQuestSpawn(quest.mob, hrp, 500) then
-					local centroid = discoverSubZone(quest.mob)
-					if centroid then
-						local dest = centroid + Vector3.new(0, 6, 0)
-						local snapDist = (dest - hrp.Position).Magnitude
-						if snapDist < 100 then
-							-- Tiny drift → direct CFrame. Under ~100 studs BF's
-							-- anti-cheat accepts an instant reposition, so we
-							-- skip the heavier flight-teardown tween. BP just
-							-- gets its target updated on the new HRP position so
-							-- it doesn't yank us back to the old enemy.
-							hoverEnabled = false
-							hrp.CFrame = CFrame.new(dest)
-							task.wait(0.4)
-							if _hoverBP and _hoverBP.Parent then
-								_hoverBP.Position = hrp.Position
-							end
-							hoverEnabled = true
-						else
-							-- Real snap (≥100 studs) → tear down flight first,
-							-- otherwise the BP (MaxForce=inf, Position=old
-							-- enemy) fights the tween every frame and BF's
-							-- anti-cheat rejects the resulting jitter — OR,
-							-- worse, a raw CFrame jump of 400-1000 studs (the
-							-- Galley Captain sub-zone sits ~880 studs from the
-							-- Cyborg spawn we get stranded on) gets rolled
-							-- straight back. The noclip tween moves at a
-							-- server-accepted speed so the move sticks. Same
-							-- pattern tpToIsland uses for
-							-- cross-island moves. Skip the island re-TP
-							-- check while we're snapping by setting
-							-- _tpInProgress so autoFarmLoop doesn't fight us.
+
+				if anyAlive then
+					-- Farm loop handles the kill; pause the walk cursor.
+					Q.walkIdx = nil
+				else
+					-- Nothing spawned: step through this mob's anchors, pausing a
+					-- few seconds at each for the server to spawn a wave.
+					local anchors = spawnAnchorList(quest.mob)
+					if #anchors > 0 then
+						if not Q.walkIdx or Q.walkIdx > #anchors then Q.walkIdx = 1 end
+						local dest = anchors[Q.walkIdx] + Vector3.new(0, 6, 0)
+						local distToDest = (dest - hrp.Position).Magnitude
+						if distToDest > 60 then
+							-- Travel to this anchor via the same server-accepted noclip
+							-- tween tpToIsland uses (no rollback). _tpInProgress pauses
+							-- autoFarmLoop so the two loops don't fight over the HRP.
 							_tpInProgress = true
 							local restoreAuto   = cfg.autoFarm
 							local restoreAutoFL = cfg.autoFarmLevel
 							cfg.autoFarm = false
 							cfg.autoFarmLevel = false
 							safe(_stopFlightFn)
-							safe(function() _tweenHRPTo(hrp, dest) end)
-							-- Refresh grace so the next autoFarmLevelLoop
-							-- tick doesn't immediately re-TP us back to
-							-- island.pos (which would defeat the whole
-							-- point of snapping into the sub-zone).
+							if distToDest < 100 then
+								hrp.CFrame = CFrame.new(dest)
+							else
+								safe(function() _tweenHRPTo(hrp, dest) end)
+							end
+							-- Hold island grace so the next tick doesn't yank us back to
+							-- island.pos mid-sweep.
 							_islandGraceUntil = tick() + 60
 							_islandGraceName  = quest.island
 							cfg.autoFarm = restoreAuto
 							cfg.autoFarmLevel = restoreAutoFL
 							_tpInProgress = false
 							safe(startFlight)
+							Q.walkArrivedAt = tick()
+						elseif tick() - (Q.walkArrivedAt or 0) > 4 then
+							-- Sat here ~4s with no spawn -> next anchor (wrap around).
+							Q.walkIdx = (Q.walkIdx % #anchors) + 1
 						end
 					end
 				end
 			end
-
 			jwait(3.0)
 		end
 	end
