@@ -87,7 +87,7 @@ function Module.start(lib)
 		-- combat
 		aimbot         = false,      -- master aimbot switch
 		aimbotMode     = "Kill Aura",-- "Kill Aura" (auto-hit nearest) or "Silent Aim" (hit on YOUR shot)
-		aimbotGunsOnly = true,       -- only fire while a gun is equipped
+		aimbotGunsOnly = false,      -- optional: restrict the aura to only fire while a gun is equipped
 		aimbotRange    = 800,        -- max stud distance to a target
 		infiniteEnergy = false,      -- top the energy/stamina bar back up
 
@@ -3358,18 +3358,25 @@ function Module.start(lib)
 
 	-- ═══════════════════════════ COMBAT ═══════════════════════════
 	-- Aimbot: guns (and every Mouse.Hit-based skill) fire at the cursor, so
-	-- "aim" is just keeping the game's Mouse module pinned on the best enemy —
-	-- the same override the ability caster uses, run every frame while enabled.
 	-- ═══════════════════════════ AIMBOT ═══════════════════════════
-	-- Two modes, both driving the proven hash-M1 path (attackOnce → the same
-	-- RegisterAttack + RegisterHit the farm uses to drop Galley Captains):
-	--   • Kill Aura  — auto-fires at the nearest mob in range, every cadence.
-	--   • Silent Aim — fires at whatever's closest to your crosshair, but only
-	--                  when YOU click to shoot, so the gun's shot lands on aim.
-	-- No metamethod hook here on purpose: this codebase disables __namecall /
-	-- __index (Hyperion delayed-crash risk), so Silent Aim reads the click
-	-- through UserInputService and injects the hit rather than rewriting the
-	-- outgoing packet. Bosses are hash-immune (Cyborg took 0), so we skip them.
+	-- The damage path depends on the equipped weapon — reverse-engineered live:
+	--   • Melee / Sword — the hash M1 (attackOnce → RegisterAttack + RegisterHit,
+	--     the same call the farm uses to drop mobs). Infinite range, auto-hit.
+	--   • Gun — the hash M1 does ZERO damage while a gun is held (the server
+	--     validates the equipped weapon). A real gun shot fires TWO remotes per
+	--     click: Validator2(token, seq) then ShootGunEvent(aimPos, {}). The
+	--     Validator2 token is an anti-cheat nonce we can't forge, so instead we
+	--     let the GAME fire the shot for us: a VirtualInputManager click with
+	--     the Mouse module pinned on the target. The click just triggers; aim
+	--     comes from the pin (verified — ShootGunEvent used our pinned pos).
+	-- Two modes:
+	--   • Kill Aura  — auto-fires at the nearest mob every cadence (AFK; this is
+	--     what grinds gun mastery hands-free).
+	--   • Silent Aim — snaps your own shot onto the crosshair target when YOU
+	--     click. No metamethod hook (this codebase disables __namecall/__index
+	--     over Hyperion crash risk); melee injects a hash hit, gun re-pins the
+	--     Mouse so the game's own shot lands on aim.
+	-- Bosses are hash-immune (Cyborg took 0), so we skip them.
 	local _BOSS_NAMES = {}
 	for _, q in ipairs(SEA1_QUESTS) do if q.boss then _BOSS_NAMES[q.mob] = true end end
 
@@ -3401,8 +3408,7 @@ function Module.start(lib)
 
 	-- Target closest to the camera's aim ray (smallest angular deviation),
 	-- within range and roughly in front. Considers mobs AND other players so
-	-- Silent Aim can be pointed at a PvP target — the hash path's effect on
-	-- players is unverified, but a whiffed RegisterHit is harmless.
+	-- Silent Aim can be pointed at a PvP target.
 	local function _crosshairTarget()
 		local cam = workspace.CurrentCamera
 		local ch  = LocalPlayer.Character
@@ -3434,17 +3440,50 @@ function Module.start(lib)
 		return best
 	end
 
-	-- Kill Aura — auto-attack loop.
+	-- Fire the equipped GUN at a target: pin the Mouse module on it (that's
+	-- what ShootGunEvent reads for aim) and let VIM trigger a real click so the
+	-- game emits the valid Validator2 + ShootGunEvent pair. The screen position
+	-- of the click only needs to be on-screen — aim is the pin, not the click.
+	local function fireGunAt(mouse, target)
+		local th = target:FindFirstChild("HumanoidRootPart") or pickPart(target)
+		if not th then return end
+		local cam = workspace.CurrentCamera
+		if not cam then return end
+		local firing = true
+		task.spawn(function()
+			while firing do
+				if th and th.Parent then mouse.Hit = CFrame.new(th.Position) end
+				RunService.Heartbeat:Wait()
+			end
+		end)
+		local svp = cam:WorldToViewportPoint(th.Position)
+		local sx, sy
+		if svp.Z > 0 then sx, sy = svp.X, svp.Y
+		else sx, sy = cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2 end
+		VIM:SendMouseButtonEvent(sx, sy, 0, true, game, 0)
+		task.wait(0.05)
+		VIM:SendMouseButtonEvent(sx, sy, 0, false, game, 0)
+		task.wait(0.05)
+		firing = false
+	end
+
+	-- Kill Aura — auto-attack loop. Dispatches on the equipped weapon.
 	task.spawn(function()
 		while _running do
 			if cfg.aimbot and cfg.aimbotMode == "Kill Aura" then
 				local ch  = LocalPlayer.Character
 				local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
-				if hrp and (not cfg.aimbotGunsOnly or _gunEquipped(ch)) then
+				local gun = _gunEquipped(ch)
+				if hrp and (not cfg.aimbotGunsOnly or gun) then
 					local mob = _nearestMob(hrp.Position)
 					if mob then
-						ensureHash()
-						safe(function() attackOnce(mob) end)
+						if gun then
+							local mouse = getMouse()
+							if mouse then safe(function() fireGunAt(mouse, mob) end) end
+						else
+							ensureHash()
+							safe(function() attackOnce(mob) end)
+						end
 					end
 				end
 			end
@@ -3452,16 +3491,31 @@ function Module.start(lib)
 		end
 	end)
 
-	-- Silent Aim — inject a hit on the crosshair target when YOU click to
-	-- fire. processed==true means the click landed on UI/chat, not the world.
+	-- Silent Aim — snap YOUR shot onto the crosshair target on click.
+	-- processed==true means the click landed on UI/chat, not the world.
 	UserInputService.InputBegan:Connect(function(input, processed)
 		if processed then return end
 		if not (cfg.aimbot and cfg.aimbotMode == "Silent Aim") then return end
 		if input.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
 		local ch = LocalPlayer.Character
-		if cfg.aimbotGunsOnly and not _gunEquipped(ch) then return end
+		local gun = _gunEquipped(ch)
+		if cfg.aimbotGunsOnly and not gun then return end
 		local target = _crosshairTarget()
-		if target then
+		if not target then return end
+		if gun then
+			-- Re-pin the Mouse onto the target for the shot window so the
+			-- game's own gun fire (which you triggered) lands on it.
+			local mouse = getMouse()
+			local th = target:FindFirstChild("HumanoidRootPart")
+			if not (mouse and th) then return end
+			task.spawn(function()
+				local t0 = os.clock()
+				while os.clock() - t0 < 0.25 and th.Parent do
+					mouse.Hit = CFrame.new(th.Position)
+					RunService.Heartbeat:Wait()
+				end
+			end)
+		else
 			ensureHash()
 			safe(function() attackOnce(target) end)
 		end
