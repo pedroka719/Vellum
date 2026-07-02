@@ -2067,10 +2067,16 @@ function Module.start(lib)
 						end
 					end
 				end
-				-- Snap to centroid only when we're > 400 studs from EVERY
-				-- alive quest mob. Centroid is calculated from the same scan
-				-- via discoverSubZone — only call it when we actually need it.
-				if nearestDist > 400 then
+				-- Snap to the centroid only when we're genuinely stranded —
+				-- far from every ALIVE quest mob (>400) AND not already sitting
+				-- in the spawn zone. Without the nearQuestSpawn guard the snap
+				-- re-fired every 3s while we waited at an empty spawn (mobs on a
+				-- respawn timer, or the char soft-flagged so the server
+				-- suppresses spawns around us): each fire tore down and rebuilt
+				-- flight and nudged the HRP, thrashing the anti-cheat for no
+				-- reason — which itself can keep the soft-flag hot. Now we only
+				-- snap when actually away from the static spawn anchors.
+				if nearestDist > 400 and not nearQuestSpawn(quest.mob, hrp, 500) then
 					local centroid = discoverSubZone(quest.mob)
 					if centroid then
 						local dest = centroid + Vector3.new(0, 6, 0)
@@ -2431,6 +2437,17 @@ function Module.start(lib)
 
 			safe(function()
 				local enemy = currentTarget
+				-- Drop a stale or wrong-species target before committing to it.
+				-- Without the name guard a currentTarget left over from a
+				-- filter-less tick — e.g. the Cyborg boss that shares Fountain
+				-- City with the Galley Captains — sticks, and we hammer a boss we
+				-- can't damage (and drift toward it) instead of re-picking the
+				-- quest mob. pickEnemy already honors the filter; force a re-pick.
+				if enemy and enemy.Parent and cfg.farmTargetName ~= ""
+				   and enemy.Name ~= cfg.farmTargetName then
+					enemy = nil
+					currentTarget = nil
+				end
 				if not enemy or not enemy.Parent then
 					-- Actively pick the next target and tween to it.
 					-- Without this, we'd jwait 0.3s doing nothing and rely on
