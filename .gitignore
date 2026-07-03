@@ -8,3 +8,4 @@ Thumbs.db
 # local-only scratch
 scratch/
 *.local.lua
+bundle.lua

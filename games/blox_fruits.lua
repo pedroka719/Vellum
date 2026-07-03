@@ -71,9 +71,8 @@ function Module.start(lib)
 		mobBring = false,           -- pull all nearby enemies toward player
 		mobBringRadius = 50,        -- max studs to pull enemies from
 
-		-- auto farm level (replaces autoSea1)
+		-- auto farm level
 		autoFarmLevel = false,       -- full quest lifecycle (accept → farm → detect done → re-accept)
-		autoSea1 = false,            -- kept for backward compat, driven by autoFarmLevel
 		skipBossQuests = true,       -- skip 1-kill boss quests (Warden, Chief Warden, etc) —
 		                             -- ~5min spawn timers tank XP/hour vs regular mob quests
 
@@ -124,8 +123,6 @@ function Module.start(lib)
 		antiAfk = true,
 
 		-- spy
-		spyEnabled = true,
-		spyBufferSize = 200,        -- rolling log size
 		notifyInGame = true,        -- toast notifications
 		keybindToggle = true,       -- RightShift toggles UI minimize
 	}
@@ -141,21 +138,11 @@ function Module.start(lib)
 	local jwait = Helpers.makeJwait(cfg)
 	local safe = Helpers.makeSafe("Vellum BF")
 
-	-- ═══════════════════════════ PERSISTENT SPY ═══════════════════════════
-	-- Rolling log + persistent session hash store. The __namecall hook is
-	-- installed once per Roblox session and writes captured hashes into
-	-- getgenv().VellumBF.hash, where every future BF module boot reads from.
+	-- ═══════════════════════════ SESSION HASH ═══════════════════════════
+	-- Persistent per-session hash store in getgenv, so a reload keeps the
+	-- registered hash instead of re-registering it.
 	getgenv().VellumBF = getgenv().VellumBF or {}
 	local SPY = getgenv().VellumBF
-	-- Ring buffer. O(1) push, no per-insert shift. If a prior boot left a
-	-- different-shaped log behind, re-initialize.
-	if type(SPY.log) ~= "table" or SPY.cap ~= cfg.spyBufferSize then
-		SPY.log   = table.create(cfg.spyBufferSize)
-		SPY.cap   = cfg.spyBufferSize
-		SPY.head  = 1   -- next write slot
-		SPY.count = 0   -- entries actually written, capped at cap
-	end
-	SPY.frozen = false
 
 	-- Teleport-in-progress guard. Pauses autoFarm + flight while a TP runs
 	-- so the hover loop doesn't fight the tween for HRP control.
@@ -209,30 +196,6 @@ function Module.start(lib)
 		warn("[Vellum BF] session hash cleared — will regenerate on next tick")
 	end
 
-	local function spyPush(row)
-		if SPY.frozen then return end
-		SPY.log[SPY.head] = row
-		SPY.head = (SPY.head % SPY.cap) + 1
-		if SPY.count < SPY.cap then SPY.count = SPY.count + 1 end
-	end
-
-	-- Newest N entries in chronological order (oldest of the N → newest).
-	-- Used by the spy-dump UI button. n defaults to SPY.count.
-	local function spyTail(n)
-		n = math.min(n or SPY.count, SPY.count)
-		local out = table.create(n)
-		for i = 1, n do
-			local idx = ((SPY.head - (n - i) - 2) % SPY.cap) + 1
-			out[i] = SPY.log[idx]
-		end
-		return out
-	end
-
-	-- ─── Hash self-generation ───
-	-- We self-generate and register the session hash instead of extracting it
-	-- from BF's CombatUtil (which doesn't initialize properly in executors).
-	-- The hash formula matches the game's: UserId:sub(2,4) .. thread:sub(11,15).
-	-- generateHash(), registerHash(), and ensureHash() defined above.
 
 	-- BF rotates the hash every respawn. Generate a fresh one, register it,
 	-- and resume farming on the new character.
@@ -243,97 +206,6 @@ function Module.start(lib)
 			task.wait(1.5)  -- let the character load
 			ensureHash()
 		end)
-	end)
-
-	-- Hooks DISABLED: suspected Hyperion delayed-crash trigger.
-	-- Our attack loop fires FireServer directly with self-generated hash
-	-- — no dependency on either hook. Keep dead code for easy re-enable
-	-- during debugging sessions where spy capture is needed.
-	if false then
-		local POLL_NOISE = {
-			getInventory = true, getFish = true, getRaceLevel = true,
-			getInfo = true, getStarterPack = true, getRouletteData = true,
-		}
-		SPY.decim = 5
-		SPY.decimN = 0
-		local oldNC
-		oldNC = hookmetamethod(game, "__namecall", function(self, ...)
-			local m = getnamecallmethod()
-			if m == "FireServer" or m == "InvokeServer" then
-				local nm = self.Name
-				local v = (select(1, ...))
-				if not (type(v) == "string" and POLL_NOISE[v]) then
-					SPY.decimN = (SPY.decimN % SPY.decim) + 1
-					if SPY.decimN == 1 then
-						spyPush({
-							t = os.clock(),
-							r = nm,
-							m = m,
-							v = type(v) == "string" and v or "<" .. type(v) .. ">",
-						})
-					end
-				end
-			end
-			return oldNC(self, ...)
-		end)
-		SPY.hookInstalled = true
-	end
-
-	-- ─── Mouse.Hit / Mouse.Target substitution hook ───
-	-- Persistent __index hook on game. When SPY._captureMode is on, any read
-	-- of Mouse.Hit or Mouse.Target returns SPY._captureTarget.CFrame / the
-	-- part itself, instead of whatever the user's real cursor is pointing at.
-	--
-	-- This is what lets a synthetic firesignal(Tool.Activated) actually land
-	-- a hit — BF's combat handler reads Mouse.Hit at click time; without the
-	-- hook it sees the user's actual cursor position (sky, ground, nothing),
-	-- bails, and never fires RegisterHit. With the hook it sees the enemy
-	-- HRP we chose, fires RegisterHit normally, and our __namecall spy above
-	-- catches the hash from that call.
-	--
-	-- Critical safety: NEVER access self.Anything inside the hook — that
-	-- would re-trigger __index and infinite-recurse. Use oldIdx(self, key)
-	-- for any property read we need, and :IsA which goes through __namecall
-	-- (a different metamethod) so it doesn't loop.
-	if false then
-		-- __index Mouse redirect DISABLED — same root cause as __namecall
-		-- hook. Current attackOnce() fires FireServer directly, has no
-		-- dependency on Mouse redirects. Keep dead code for re-enable.
-		local oldIdx
-		oldIdx = hookmetamethod(game, "__index", function(self, key)
-			if SPY._captureMode and SPY._captureTarget then
-				if typeof(self) == "Instance" and self:IsA("Mouse") then
-					local target = SPY._captureTarget
-					local targetCF = oldIdx(target, "CFrame")
-					local targetPos = targetCF.Position
-					if key == "Hit" then
-						return targetCF
-					elseif key == "Target" then
-						return target
-					elseif key == "Origin" then
-						return oldIdx(workspace.CurrentCamera, "CFrame")
-					elseif key == "UnitRay" then
-						local camCF = oldIdx(workspace.CurrentCamera, "CFrame")
-						return Ray.new(camCF.Position, (targetPos - camCF.Position).Unit)
-					elseif key == "X" or key == "Y" then
-						local vp = oldIdx(workspace.CurrentCamera, "ViewportSize")
-						return key == "X" and vp.X * 0.5 or vp.Y * 0.5
-					end
-				end
-			end
-			return oldIdx(self, key)
-		end)
-		SPY.mouseHookInstalled = true
-	end
-
-	-- Punishment detection — if BF kicks us, surface the spy buffer.
-	game:GetService("LogService").MessageOut:Connect(function(msg, mtype)
-		if mtype ~= Enum.MessageType.MessageError then return end
-		if msg:lower():find("kick") or msg:lower():find("ban") or msg:lower():find("disconnect") then
-			SPY.frozen = true
-			warn("[Vellum BF] PUNISHMENT DETECTED — spy buffer frozen with " ..
-				tostring(SPY.count) .. " entries. Inspect getgenv().VellumBF.log")
-		end
 	end)
 
 	-- ═══════════════════════════ COMBAT ═══════════════════════════
@@ -1645,36 +1517,12 @@ function Module.start(lib)
 	end
 
 	-- ═══════════════════════════ SHOP ═══════════════════════════
-	-- Canonical NPC positions from ReplicatedStorage.NPCs.<name>.FloorPos
-	-- (the attribute BF uses to position NPCs after the world loads).
-	-- Hardcoded because StreamingEnabled hides distant NPCs from workspace
-	-- — we can't find them via workspace scan unless we're already there.
-	local NPC_LOCATIONS = {
-		BloxFruitDealer       = Vector3.new(-921, 6, 1608),     -- Middle Town
-		WeaponDealer          = Vector3.new(-699, 7, 1516),     -- Middle Town
-		SwordDealer           = Vector3.new(-2538, 5, 2027),    -- Marine Starter
-		SwordDealerWest       = Vector3.new(-1277, 12, 3985),   -- Pirate Village
-		SwordDealerEast       = Vector3.new(1432, 86, -1388),   -- Frozen Village
-		MasterSwordDealer     = Vector3.new(-4748, 716, -2654), -- Skylands
-		AdvancedWeaponDealer  = Vector3.new(-5000, 40, 4402),   -- Marine Fortress
-		Blacksmith            = Vector3.new(-1097, 14, 4009),   -- Pirate Village
-		DarkStepTeacher       = Vector3.new(-984, 12, 3990),    -- Pirate Village
-		WaterKungFuTeacher    = Vector3.new(61587, 20, 988),    -- Underwater City
-		AbilityTeacher        = Vector3.new(1489, 36, -1413),   -- Frozen Village
-		InstinctTeacher       = Vector3.new(-8037, 5755, -1929),-- Skylands tower top
-		BoatDealer            = Vector3.new(-393, 1, 1546),     -- Middle Town
-		LuxuryBoatDealer      = Vector3.new(-2534, 3, 1841),    -- Marine Starter
-	}
 
 	-- Pure remote purchase — no TP needed. Verified live: BuyItem works
 	-- from anywhere in the world, the server doesn't check NPC proximity.
 	-- Earlier probe bought Triple Katana from Magma while the Master
 	-- Sword Dealer was at Skylands; the item still landed in the
-	-- backpack. The NPC_LOCATIONS table stays around because some
-	-- future shop calls (boats, certain fruit purchases) might require
-	-- proximity — we'll re-add the TP wrapper if/when that turns out
-	-- to be the case.
-	--   npcKey   — kept in the signature for future-proofing / logging
+	-- backpack.
 	--   item     — exact item string the server expects ("Triple Katana")
 	--   displayName — for the toast (defaults to item)
 	-- Returns true once the item is owned (server code 1 = bought, 2 = already own).
@@ -3013,7 +2861,7 @@ function Module.start(lib)
 	-- 1 = bought, 0 = not enough Beli, 2 = already own.
 	-- Shop item schema:
 	--   item     — exact name BF expects in BuyItem
-	--   npc      — NPC_LOCATIONS key (kept for future TP-required items)
+	--   npc      — label only; the server needs no NPC proximity
 	--   prereq   — nil for buy-anywhere, or table with:
 	--     kind    — "level" | "boss" | "mastery" | "race" | "fragment" | "quest"
 	--     value   — number for level/fragment/mastery
@@ -3301,9 +3149,6 @@ function Module.start(lib)
 	ui.toggleRow(settings, "In-game toast notifications",
 		function() return cfg.notifyInGame end,
 		function(v) cfg.notifyInGame = v end)
-	ui.toggleRow(settings, "Persistent remote spy",
-		function() return cfg.spyEnabled end,
-		function(v) cfg.spyEnabled = v end)
 
 	ui.actionBtn(settings, "Reset session hash (force regenerate)", function()
 		clearHash()
@@ -3314,12 +3159,6 @@ function Module.start(lib)
 		})
 	end)
 
-	ui.actionBtn(settings, "Dump spy buffer to console", function()
-		print("=== Vellum BF spy buffer (" .. SPY.count .. " entries) ===")
-		for _, r in ipairs(spyTail(60)) do
-			print(string.format("[%.2f] %s %s %s", r.t, r.r, r.m, r.v))
-		end
-	end)
 
 	ui.newTab("farm",     "Farm",     1)
 	ui.newTab("combat",   "Combat",   2)

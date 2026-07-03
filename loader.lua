@@ -6,18 +6,8 @@
 --
 --   loadstring(game:HttpGet("<this file>"))()
 --
--- DISTRIBUTION
---   While the repo is private, `game:HttpGet` cannot reach raw.github
---   (no auth headers). Three viable paths:
---
---   1. Mirror this file + every dep to a public gist. Set BASE to the
---      gist raw URL. Easy but manual sync.
---   2. Flip the repo public when launching. BASE stays as-is.
---   3. Build a tiny CF Worker proxy that auths to GitHub on your behalf.
---      Set BASE to the worker URL. Best for paid distribution.
---
---   For dev, swap BASE to a local override or use a single bundled file
---   (see TODO at bottom — bundler script not yet written).
+-- Public repo raw over HttpGet. If the host is unreachable, inline the
+-- modules into one file and run that directly.
 
 local REPO = "Shinigami-V/Vellum"
 local REF  = "main"
@@ -165,9 +155,3 @@ if not ok then
 	warn("[Vellum BOOT ERROR]\n" .. tostring(err))
 end
 
--- TODO: companion bundler
---   When ready for distribution we'll add a `tools/bundle.lua` that
---   concatenates loader + every lib + a single game module into one
---   self-contained file. That bundle gets pushed to a public gist (or
---   the public-flipped repo) and users loadstring it directly without
---   any fanout HttpGets.
