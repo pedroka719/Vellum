@@ -70,8 +70,8 @@ function Module.start(lib)
 		aggressiveRange = false,    -- pull target under us each tick (ignores server range)
 		mobBring = false,           -- pull all nearby enemies toward player
 		mobBringRadius = 50,        -- max studs to pull enemies from
-		killAura = false,           -- standalone: hit every mob within reach each tick.
-		                            -- Stacks with Auto Farm Level (farm moves, aura clears the pack).
+		killAura = false,           -- farm attack mode: ON = sweep every mob within reach
+		                            -- (pack clear); OFF = single target. Rides Auto Farm Level's hover.
 
 		-- auto farm level
 		autoFarmLevel = false,       -- full quest lifecycle (accept → farm → detect done → re-accept)
@@ -145,6 +145,7 @@ function Module.start(lib)
 	-- registered hash instead of re-registering it.
 	getgenv().VellumBF = getgenv().VellumBF or {}
 	local SPY = getgenv().VellumBF
+	SPY.cfg = cfg  -- expose live for probing / tuning toggles from the executor
 
 	-- Teleport-in-progress guard. Pauses autoFarm + flight while a TP runs
 	-- so the hover loop doesn't fight the tween for HRP control.
@@ -2517,10 +2518,14 @@ function Module.start(lib)
 
 				-- Damage through the game's own hit pipeline (_G.SendHitsToServer
 				-- via getrenv). The raw RE/RegisterHit is a virtual remote the
-				-- server ignores, so the old hash/VIM paths dealt 0. Single
-				-- target here — the standalone Kill Aura toggle handles pack
-				-- clearing so the two features stack independently.
-				sendHit(enemy)
+				-- server ignores, so the old hash/VIM paths dealt 0. Kill Aura
+				-- turns the farm's single hit into a pack sweep — same hover, but
+				-- every mob within reach takes the swing instead of just the target.
+				if cfg.killAura then
+					attackAura(nil)
+				else
+					sendHit(enemy)
+				end
 
 				-- Clear currentTarget as SOON as the enemy dies (Health <= 0),
 				-- not when BF removes the corpse from workspace.Enemies
@@ -2689,7 +2694,7 @@ function Module.start(lib)
 		function() return cfg.mobBringRadius end,
 		function(v) cfg.mobBringRadius = v end,
 		{ min = 10, max = 250, step = 5, suffix = " st" })
-	ui.toggleRow(farm, "Kill Aura | Mob Aura (hit all nearby)",
+	ui.toggleRow(farm, "Kill Aura (farm sweeps whole pack, not just target)",
 		function() return cfg.killAura end,
 		function(v) cfg.killAura = v end)
 
@@ -3475,22 +3480,6 @@ function Module.start(lib)
 				end
 			end
 			task.wait(cfg.attackCadence)
-		end
-	end)
-
-	-- Mob Aura (Main-tab toggle) — standalone pack clearing, independent of the
-	-- farm and the aimbot. Hits every live mob within melee reach each tick.
-	-- Alone it damages whatever's already near you; stacked on Auto Farm Level
-	-- the farm supplies the movement/hover and this clears the whole spawn.
-	task.spawn(function()
-		while _running do
-			if cfg.killAura then
-				safe(ensureWeaponEquipped)
-				attackAura(nil)
-				jwait(cfg.attackCadence)
-			else
-				jwait(0.5)
-			end
 		end
 	end)
 
