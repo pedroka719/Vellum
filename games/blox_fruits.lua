@@ -61,7 +61,7 @@ function Module.start(lib)
 
 		-- farm
 		autoFarm = false,
-		farmHeight = 10,            -- studs above target (safe farm)
+		farmHeight = 5,             -- studs above target — must stay in melee range for the VIM M1 to land
 		attackCadence = 0.25,       -- sec between RegisterAttack/Hit pairs
 		damageMultiplier = 1.0,     -- 1.0 = always finisher hits
 		farmLevelMin = 0,           -- only attack enemies within range
@@ -2135,6 +2135,28 @@ function Module.start(lib)
 		return _mouseMod or nil
 	end
 
+	-- Real M1 via VIM. BF's current combat ignores a bare RegisterAttack /
+	-- RegisterHit FireServer (the self-generated-hash trick is patched dead);
+	-- only a genuine input click lands damage, and the server does the hit
+	-- detection from our position. So we pin the Mouse module on the target to
+	-- aim the swing and let VIM fire the click — the caller keeps us in melee
+	-- range (low farmHeight). Verified live: bare RegisterAttack = 0 dmg even
+	-- point-blank; this VIM click = real damage.
+	local function meleeM1At(mouse, enemy)
+		if not enemy then return end
+		local part = enemy:FindFirstChild("HumanoidRootPart") or pickPart(enemy)
+		local cam = workspace.CurrentCamera
+		if not part or not cam then return end
+		if mouse then mouse.Hit = CFrame.new(part.Position) end
+		local svp = cam:WorldToViewportPoint(part.Position)
+		local sx, sy
+		if svp.Z > 0 then sx, sy = svp.X, svp.Y
+		else sx, sy = cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2 end
+		VIM:SendMouseButtonEvent(sx, sy, 0, true, game, 0)
+		task.wait(0.05)
+		VIM:SendMouseButtonEvent(sx, sy, 0, false, game, 0)
+	end
+
 	-- Aim target: the live farm target if we have one, else the closest
 	-- breathing enemy in reach. Returns the enemy HRP (not a static point) so
 	-- the aim tracks it as it moves, or nil when there's nothing to hit — no
@@ -2418,14 +2440,11 @@ function Module.start(lib)
 					return
 				end
 
-				-- Standard RegisterAttack+RegisterHit protocol with self-generated hash.
-				ensureHash()  -- generates + registers if not yet set
-				local t0 = os.clock()
-				local landed = attackOnce(enemy)
-				local elapsed = os.clock() - t0
-				if elapsed > 0.01 then
-					dbg("attack-slow", enemy.Name .. " took=" .. string.format("%.4f", elapsed))
-				end
+				-- Real M1 via VIM. The old direct-remote attack (RegisterAttack +
+				-- RegisterHit + hash) is dead — BF now only damages on a genuine
+				-- input click. meleeM1At pins the aim and clicks; our hover keeps
+				-- us in melee range so the server's hit detection lands.
+				meleeM1At(getMouse(), enemy)
 
 				-- Clear currentTarget as SOON as the enemy dies (Health <= 0),
 				-- not when BF removes the corpse from workspace.Enemies
