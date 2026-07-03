@@ -61,7 +61,7 @@ function Module.start(lib)
 
 		-- farm
 		autoFarm = false,
-		farmHeight = 5,             -- studs above target — must stay in melee range for the VIM M1 to land
+		farmHeight = 50,            -- studs above target — full damage through ~55, out of the mob's own reach
 		attackCadence = 0.25,       -- sec between RegisterAttack/Hit pairs
 		damageMultiplier = 1.0,     -- 1.0 = always finisher hits
 		farmLevelMin = 0,           -- only attack enemies within range
@@ -232,11 +232,75 @@ function Module.start(lib)
 		return true
 	end
 
+	-- ── Damage via the game's own hit pipeline ──────────────────────────
+	-- RE/RegisterHit is a *virtual* remote: the event name is XOR-encoded and
+	-- rides a "carrier" remote that reparents itself between random folders,
+	-- and the server validates that carrier's identity. Firing the raw
+	-- RE/RegisterHit (what attackOnce does) is silently dropped — that's the
+	-- real reason the hash path deals 0 damage, not the hash itself.
+	-- CombatUtil registers a per-session hash inside its own coroutine and
+	-- leaves _G.SendHitsToServer(part, hits) as the gateway that flushes a hit
+	-- through that coroutine with the valid hash + correct channel. It lives in
+	-- the GAME's global env, not the executor's, so we reach it via getrenv()._G.
+	-- The server range-checks from our position and needs a weapon equipped —
+	-- verified live 2026-07-03: Combat equipped + hover 40–55 studs = full
+	-- damage, zero damage taken; beyond ~80 studs it drops to 0.
+	local _gameEnv
+	local function gameHits()
+		if _gameEnv and _gameEnv.SendHitsToServer then return _gameEnv.SendHitsToServer end
+		local ok, g = pcall(function() return getrenv()._G end)
+		if ok and type(g) == "table" and type(g.SendHitsToServer) == "function" then
+			_gameEnv = g
+			return g.SendHitsToServer
+		end
+		return nil
+	end
+
+	-- Server-side melee reach for a registered hit. ~55 studs is the measured
+	-- edge (full damage through the low 40s, gone by the mid 80s).
+	local MELEE_REACH = 55
+
+	-- One hit on a single enemy through the game pipeline. Used by Silent Aim.
+	local function sendHit(enemy)
+		local send = gameHits()
+		if not send then return false end
+		local part = enemy and (enemy:FindFirstChild("HumanoidRootPart") or pickPart(enemy))
+		if not part then return false end
+		safe(function() R.RegisterAttack:FireServer(cfg.damageMultiplier) end)
+		safe(function() send(part, {}) end)
+		return true
+	end
+
+	-- Aura: one RegisterAttack, then a hit on every live enemy within reach of
+	-- our current position. `filter` (a mob name, or "" / nil for any) keeps
+	-- quest mode from crediting the wrong mob. This is what lets a single swing
+	-- clear the whole pack instead of one target.
+	local function attackAura(filter)
+		filter = filter or ""
+		local send = gameHits()
+		if not send then return end
+		local ch = LocalPlayer.Character
+		local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+		local ef = workspace:FindFirstChild("Enemies")
+		if not (hrp and ef) then return end
+		local origin = hrp.Position
+		safe(function() R.RegisterAttack:FireServer(cfg.damageMultiplier) end)
+		for _, e in ipairs(ef:GetChildren()) do
+			if filter == "" or e.Name == filter then
+				local eh = e:FindFirstChild("HumanoidRootPart")
+				local hum = eh and e:FindFirstChildOfClass("Humanoid")
+				if eh and hum and hum.Health > 0 and (eh.Position - origin).Magnitude <= MELEE_REACH then
+					safe(function() send(eh, {}) end)
+				end
+			end
+		end
+	end
+
 	-- ═══════════════════════════ COMBAT ═══════════════════════════
-	-- We use the standard RegisterAttack + RegisterHit protocol with a
-	-- self-generated hash. The CombatFramework API path was removed in
-	-- BF's internal refactor (no RigLib, no RigControllerEvent, no
-	-- PlayerScripts.CombatFramework). The hash is the only gate.
+	-- Damage goes through the game's own hit pipeline (attackAura / sendHit
+	-- above). attackOnce + the self-generated hash below are the dead
+	-- raw-remote path, kept only for reference — the server ignores the raw
+	-- RE/RegisterHit, so they deal 0 damage. Nothing calls them anymore.
 
 	-- ═══════════════════════════ TARGETING ═══════════════════════════
 	-- Logia immunity: tracked behaviorally because BF doesn't expose the
@@ -2440,11 +2504,11 @@ function Module.start(lib)
 					return
 				end
 
-				-- Real M1 via VIM. The old direct-remote attack (RegisterAttack +
-				-- RegisterHit + hash) is dead — BF now only damages on a genuine
-				-- input click. meleeM1At pins the aim and clicks; our hover keeps
-				-- us in melee range so the server's hit detection lands.
-				meleeM1At(getMouse(), enemy)
+				-- Damage through the game's own hit pipeline (_G.SendHitsToServer
+				-- via getrenv). The raw RE/RegisterHit is a virtual remote the
+				-- server ignores, so the old hash/VIM paths dealt 0. Aura form:
+				-- one swing hits every quest mob within reach of our hover.
+				attackAura(cfg.farmTargetName)
 
 				-- Clear currentTarget as SOON as the enemy dies (Health <= 0),
 				-- not when BF removes the corpse from workspace.Enemies
@@ -3390,8 +3454,7 @@ function Module.start(lib)
 							local mouse = getMouse()
 							if mouse then safe(function() fireGunAt(mouse, mob) end) end
 						else
-							ensureHash()
-							safe(function() attackOnce(mob) end)
+							attackAura(nil)  -- melee aura: every mob within reach
 						end
 					end
 				end
@@ -3425,8 +3488,7 @@ function Module.start(lib)
 				end
 			end)
 		else
-			ensureHash()
-			safe(function() attackOnce(target) end)
+			safe(function() sendHit(target) end)
 		end
 	end)
 
