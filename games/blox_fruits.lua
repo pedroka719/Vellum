@@ -274,14 +274,20 @@ function Module.start(lib)
 		return true
 	end
 
-	-- Aura: one swing, whole pack. BF flushes a melee hit as
-	-- FireServer(firstPart, {{mob, part}, ...}, nil, hash) — a primary target
-	-- plus a batch of extras in the second arg. Firing one SendHitsToServer per
-	-- mob does NOT stack: the server credits ~one target per swing (attack-speed
-	-- gate), so separate calls just re-hit the first mob. Packing every in-reach
-	-- mob into that batch is what lands damage on all of them at once (verified
-	-- live: two mobs, 73 damage each, from a single call). `filter` (a mob name,
-	-- "" / nil for any) keeps quest mode from crediting the wrong mob.
+	-- Server-side swing gate: the server credits ~one melee hit per this window,
+	-- so hits fired faster than it just get dropped (and a batched second arg is
+	-- only accepted intermittently — that's the "one mob lands, the rest don't"
+	-- symptom). 0.3s matches BF's attack cadence; verified live that both of two
+	-- targets land at 0.3 but starve below ~0.25.
+	local AURA_GAP = 0.3
+
+	-- Aura: sweep the pack one mob per swing window. The reference hub does the
+	-- same — separate RegisterHit(limb, {}, hash) per mob, ~0.35s apart, cycling
+	-- targets — rather than a batch, because the server gates by attack speed.
+	-- Round-robin over every in-reach mob spaced by AURA_GAP evens the damage
+	-- across the pack instead of hammering the first one. `filter` (mob name,
+	-- "" / nil for any) keeps quest mode from crediting the wrong mob. A limb
+	-- part is used (what the game's own hit detection reports), not the HRP.
 	local function attackAura(filter)
 		filter = filter or ""
 		local send = gameHits()
@@ -291,19 +297,18 @@ function Module.start(lib)
 		local ef = workspace:FindFirstChild("Enemies")
 		if not (hrp and ef) then return end
 		local origin = hrp.Position
-		local first, rest = nil, {}
 		for _, e in ipairs(ef:GetChildren()) do
 			if filter == "" or e.Name == filter then
 				local eh = e:FindFirstChild("HumanoidRootPart")
 				local hum = eh and e:FindFirstChildOfClass("Humanoid")
 				if eh and hum and hum.Health > 0 and (eh.Position - origin).Magnitude <= MELEE_REACH then
-					if not first then first = eh else rest[#rest + 1] = { e, eh } end
+					local part = pickPart(e) or eh
+					safe(function() R.RegisterAttack:FireServer(cfg.damageMultiplier) end)
+					safe(function() send(part, {}) end)
+					task.wait(AURA_GAP)
 				end
 			end
 		end
-		if not first then return end
-		safe(function() R.RegisterAttack:FireServer(cfg.damageMultiplier) end)
-		safe(function() send(first, rest) end)
 	end
 
 	-- ═══════════════════════════ COMBAT ═══════════════════════════
