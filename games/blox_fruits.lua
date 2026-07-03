@@ -70,8 +70,8 @@ function Module.start(lib)
 		aggressiveRange = false,    -- pull target under us each tick (ignores server range)
 		mobBring = false,           -- pull all nearby enemies toward player
 		mobBringRadius = 50,        -- max studs to pull enemies from
-		killAura = false,           -- farm attack mode: ON = sweep every mob within reach
-		                            -- (pack clear); OFF = single target. Rides Auto Farm Level's hover.
+		killAura = false,           -- standalone loop: sweep every mob within reach each tick.
+		                            -- Works alone (pair with Mob magnet) or on top of Auto Farm Level.
 
 		-- auto farm level
 		autoFarmLevel = false,       -- full quest lifecycle (accept → farm → detect done → re-accept)
@@ -2518,14 +2518,10 @@ function Module.start(lib)
 
 				-- Damage through the game's own hit pipeline (_G.SendHitsToServer
 				-- via getrenv). The raw RE/RegisterHit is a virtual remote the
-				-- server ignores, so the old hash/VIM paths dealt 0. Kill Aura
-				-- turns the farm's single hit into a pack sweep — same hover, but
-				-- every mob within reach takes the swing instead of just the target.
-				if cfg.killAura then
-					attackAura(nil)
-				else
-					sendHit(enemy)
-				end
+				-- server ignores, so the old hash/VIM paths dealt 0. Single target
+				-- on the quest mob; the standalone Kill Aura loop handles pack
+				-- sweeping, so it works whether or not the farm is running.
+				sendHit(enemy)
 
 				-- Clear currentTarget as SOON as the enemy dies (Health <= 0),
 				-- not when BF removes the corpse from workspace.Enemies
@@ -2694,7 +2690,7 @@ function Module.start(lib)
 		function() return cfg.mobBringRadius end,
 		function(v) cfg.mobBringRadius = v end,
 		{ min = 10, max = 250, step = 5, suffix = " st" })
-	ui.toggleRow(farm, "Kill Aura (farm sweeps whole pack, not just target)",
+	ui.toggleRow(farm, "Kill Aura | Mob Aura (hit all nearby)",
 		function() return cfg.killAura end,
 		function(v) cfg.killAura = v end)
 
@@ -3480,6 +3476,23 @@ function Module.start(lib)
 				end
 			end
 			task.wait(cfg.attackCadence)
+		end
+	end)
+
+	-- Kill Aura | Mob Aura (Main-tab toggle) — standalone pack clearing on its
+	-- own thread, so it works with OR without the farm: pair it with Mob magnet
+	-- (enemies come to you, no movement needed) or a dungeon/open map, or let
+	-- the farm's hover carry it. safe() around the sweep so one bad frame can't
+	-- kill the loop and silently disable the toggle.
+	task.spawn(function()
+		while _running do
+			if cfg.killAura then
+				safe(ensureWeaponEquipped)
+				safe(function() attackAura(nil) end)
+				jwait(cfg.attackCadence)
+			else
+				jwait(0.4)
+			end
 		end
 	end)
 
