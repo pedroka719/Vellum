@@ -9,7 +9,7 @@
 -- Public repo raw over HttpGet. If the host is unreachable, inline the
 -- modules into one file and run that directly.
 
-local REPO = "Shinigami-V/Vellum"
+local REPO = "pedroka719/Vellum"
 local REF  = "main"
 -- BASE is rewritten at boot to pin against the latest commit SHA. Fastly
 -- caches raw.githubusercontent.com/<repo>/main/* by path (querystrings
