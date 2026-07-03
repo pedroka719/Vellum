@@ -274,10 +274,14 @@ function Module.start(lib)
 		return true
 	end
 
-	-- Aura: one RegisterAttack, then a hit on every live enemy within reach of
-	-- our current position. `filter` (a mob name, or "" / nil for any) keeps
-	-- quest mode from crediting the wrong mob. This is what lets a single swing
-	-- clear the whole pack instead of one target.
+	-- Aura: one swing, whole pack. BF flushes a melee hit as
+	-- FireServer(firstPart, {{mob, part}, ...}, nil, hash) — a primary target
+	-- plus a batch of extras in the second arg. Firing one SendHitsToServer per
+	-- mob does NOT stack: the server credits ~one target per swing (attack-speed
+	-- gate), so separate calls just re-hit the first mob. Packing every in-reach
+	-- mob into that batch is what lands damage on all of them at once (verified
+	-- live: two mobs, 73 damage each, from a single call). `filter` (a mob name,
+	-- "" / nil for any) keeps quest mode from crediting the wrong mob.
 	local function attackAura(filter)
 		filter = filter or ""
 		local send = gameHits()
@@ -287,16 +291,19 @@ function Module.start(lib)
 		local ef = workspace:FindFirstChild("Enemies")
 		if not (hrp and ef) then return end
 		local origin = hrp.Position
-		safe(function() R.RegisterAttack:FireServer(cfg.damageMultiplier) end)
+		local first, rest = nil, {}
 		for _, e in ipairs(ef:GetChildren()) do
 			if filter == "" or e.Name == filter then
 				local eh = e:FindFirstChild("HumanoidRootPart")
 				local hum = eh and e:FindFirstChildOfClass("Humanoid")
 				if eh and hum and hum.Health > 0 and (eh.Position - origin).Magnitude <= MELEE_REACH then
-					safe(function() send(eh, {}) end)
+					if not first then first = eh else rest[#rest + 1] = { e, eh } end
 				end
 			end
 		end
+		if not first then return end
+		safe(function() R.RegisterAttack:FireServer(cfg.damageMultiplier) end)
+		safe(function() send(first, rest) end)
 	end
 
 	-- ═══════════════════════════ COMBAT ═══════════════════════════
