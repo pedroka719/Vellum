@@ -70,6 +70,8 @@ function Module.start(lib)
 		aggressiveRange = false,    -- pull target under us each tick (ignores server range)
 		mobBring = false,           -- pull all nearby enemies toward player
 		mobBringRadius = 50,        -- max studs to pull enemies from
+		killAura = false,           -- standalone: hit every mob within reach each tick.
+		                            -- Stacks with Auto Farm Level (farm moves, aura clears the pack).
 
 		-- auto farm level
 		autoFarmLevel = false,       -- full quest lifecycle (accept → farm → detect done → re-accept)
@@ -2246,24 +2248,33 @@ function Module.start(lib)
 		return bestPart
 	end
 
-	-- One cast: pin the mouse aim on the (moving) target for the whole cast, tap
-	-- the key. The tool's charge handler re-reads Mouse.Hit every frame, so we
-	-- keep writing it until the handler's had time to fire and release.
+	-- One cast: aim at the target, then invoke the weapon's own skill remote.
+	-- Every BF weapon carries a RemoteFunction whose InvokeServer(slot) is the
+	-- real skill trigger — the same call the tool's LocalScript makes on release
+	-- (verified live: Combat "Z" InvokeServer = full skill damage). The server
+	-- reads aim from the tool's MousePos value + the shared Mouse, so we pin
+	-- both first. This replaces the old VIM key-tap, which the flight state ate
+	-- the same way it ate the melee M1. Weapons without a RemoteFunction (rare)
+	-- fall back to the key press. Spawned so a yielding InvokeServer never
+	-- stalls the rotation loop.
 	local function castSkill(mouse, slot, targetPart)
-		local casting = true
-		task.spawn(function()
-			while casting do
-				if targetPart and targetPart.Parent then
-					mouse.Hit = CFrame.new(targetPart.Position)
-				end
-				RunService.Heartbeat:Wait()
-			end
-		end)
-		VIM:SendKeyEvent(true, Enum.KeyCode[slot], false, game)
-		task.wait(0.06)
-		VIM:SendKeyEvent(false, Enum.KeyCode[slot], false, game)
-		task.wait(0.26)
-		casting = false
+		local ch = LocalPlayer.Character
+		local tool = ch and ch:FindFirstChildOfClass("Tool")
+		if not tool then return end
+		if targetPart and targetPart.Parent then
+			local pos = targetPart.Position
+			if mouse then mouse.Hit = CFrame.new(pos) end
+			local mp = tool:FindFirstChild("MousePos")
+			if mp and mp:IsA("Vector3Value") then mp.Value = pos end
+		end
+		local rf = tool:FindFirstChild("RemoteFunction")
+		if rf and rf:IsA("RemoteFunction") then
+			task.spawn(function() safe(function() rf:InvokeServer(slot) end) end)
+		else
+			VIM:SendKeyEvent(true, Enum.KeyCode[slot], false, game)
+			task.wait(0.06)
+			VIM:SendKeyEvent(false, Enum.KeyCode[slot], false, game)
+		end
 	end
 
 	local function abilityRotationTick()
@@ -2506,9 +2517,10 @@ function Module.start(lib)
 
 				-- Damage through the game's own hit pipeline (_G.SendHitsToServer
 				-- via getrenv). The raw RE/RegisterHit is a virtual remote the
-				-- server ignores, so the old hash/VIM paths dealt 0. Aura form:
-				-- one swing hits every quest mob within reach of our hover.
-				attackAura(cfg.farmTargetName)
+				-- server ignores, so the old hash/VIM paths dealt 0. Single
+				-- target here — the standalone Kill Aura toggle handles pack
+				-- clearing so the two features stack independently.
+				sendHit(enemy)
 
 				-- Clear currentTarget as SOON as the enemy dies (Health <= 0),
 				-- not when BF removes the corpse from workspace.Enemies
@@ -2677,6 +2689,9 @@ function Module.start(lib)
 		function() return cfg.mobBringRadius end,
 		function(v) cfg.mobBringRadius = v end,
 		{ min = 10, max = 250, step = 5, suffix = " st" })
+	ui.toggleRow(farm, "Kill Aura | Mob Aura (hit all nearby)",
+		function() return cfg.killAura end,
+		function(v) cfg.killAura = v end)
 
 	ui.sectionLabel(farm, "WEAPON STYLE")
 	-- Static list of BF's four weapon style categories. Used to be
@@ -3460,6 +3475,22 @@ function Module.start(lib)
 				end
 			end
 			task.wait(cfg.attackCadence)
+		end
+	end)
+
+	-- Mob Aura (Main-tab toggle) — standalone pack clearing, independent of the
+	-- farm and the aimbot. Hits every live mob within melee reach each tick.
+	-- Alone it damages whatever's already near you; stacked on Auto Farm Level
+	-- the farm supplies the movement/hover and this clears the whole spawn.
+	task.spawn(function()
+		while _running do
+			if cfg.killAura then
+				safe(ensureWeaponEquipped)
+				attackAura(nil)
+				jwait(cfg.attackCadence)
+			else
+				jwait(0.5)
+			end
 		end
 	end)
 
